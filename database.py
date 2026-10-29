@@ -12,6 +12,7 @@ import ctypes.wintypes
 import shutil
 import bcrypt
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 from paths import DB_PATH, BACKUP_DIR, APP_VERSION
 
@@ -997,8 +998,9 @@ def crear_empleado(empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
                fecha_ingreso, tipo_cuenta, numero_cuenta, edad,
                tipo_vinculacion, tarifa_diaria, correo)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
-             tipo_cuenta, numero_cuenta, edad, tipo_vinculacion, tarifa_diaria, correo)
+            (empresa_id, nombre, documento, cargo, pesos(salario), fecha_ingreso,
+             tipo_cuenta, numero_cuenta, edad, tipo_vinculacion,
+             pesos(tarifa_diaria) if tarifa_diaria else tarifa_diaria, correo)
         )
         conn.commit()
         return True, "Empleado registrado exitosamente."
@@ -1029,8 +1031,9 @@ def actualizar_empleado(emp_id, empresa_id, nombre, documento, cargo, salario, f
                fecha_ingreso=?, tipo_cuenta=?, numero_cuenta=?, edad=?,
                tipo_vinculacion=?, tarifa_diaria=?, correo=?
                WHERE id=? AND empresa_id=?""",
-            (nombre, documento, cargo, salario, fecha_ingreso,
-             tipo_cuenta, numero_cuenta, edad, tipo_vinculacion, tarifa_diaria, correo,
+            (nombre, documento, cargo, pesos(salario), fecha_ingreso,
+             tipo_cuenta, numero_cuenta, edad, tipo_vinculacion,
+             pesos(tarifa_diaria) if tarifa_diaria else tarifa_diaria, correo,
              emp_id, empresa_id)
         )
         conn.commit()
@@ -1144,8 +1147,8 @@ def guardar_nomina(empresa_id, empleado_id, periodo, dias_trabajados, horas_extr
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             empresa_id, empleado_id, periodo, quincena, dias_trabajados,
-            horas_extras, valor_hora_extra, bonificaciones, deducciones,
-            calc["salud"], calc["pension"], calc["prestamo"], salario_base,
+            horas_extras, pesos(valor_hora_extra), pesos(bonificaciones), pesos(deducciones),
+            calc["salud"], calc["pension"], calc["prestamo"], pesos(salario_base),
             calc["salario_bruto"], calc["salario_neto"], observaciones
         ))
         conn.commit()
@@ -1157,7 +1160,8 @@ def guardar_nomina(empresa_id, empleado_id, periodo, dias_trabajados, horas_extr
                 "SELECT COALESCE(SUM(saldo),0) FROM prestamos WHERE empresa_id=? AND empleado_id=? AND estado='activo'",
                 (empresa_id, empleado_id)).fetchone()[0]
             if saldo_real > 0:
-                _actualizar_cuota_prestamo(conn, empresa_id, empleado_id, min(prestamo, saldo_real))
+                _actualizar_cuota_prestamo(conn, empresa_id, empleado_id,
+                                           min(D(prestamo), D(saldo_real)))
             conn.commit()
 
         return True, "Nómina generada exitosamente.", nomina_id
@@ -1226,7 +1230,7 @@ def estadisticas_empresa(empresa_id):
     row = conn.execute(
         "SELECT SUM(salario_neto), MAX(periodo) FROM nominas WHERE empresa_id=?", (empresa_id,)
     ).fetchone()
-    stats["total_pagado"] = row[0] or 0
+    stats["total_pagado"] = pesos(row[0] or 0)
     stats["ultimo_periodo"] = row[1] or "—"
     conn.close()
     return stats
@@ -1286,16 +1290,16 @@ def listar_empleados_por_tipo(empresa_id, tipo_vinculacion=None, incluir_inactiv
 def calcular_pago_prestacion(tarifa_diaria, dias_trabajados, bonificaciones=0, deducciones=0, prestamo=0):
     """Calcula pago para empleado de prestación de servicios (cobra por día).
     No aplica deducciones de salud ni pensión — solo préstamos activos."""
-    bruto = (float(tarifa_diaria) * int(dias_trabajados)) + float(bonificaciones)
-    neto  = bruto - float(deducciones) - float(prestamo)
+    bruto = D(tarifa_diaria) * D(dias_trabajados) + D(bonificaciones)
+    neto  = bruto - D(deducciones) - D(prestamo)
     return {
-        "tarifa_diaria":   round(float(tarifa_diaria), 2),
+        "tarifa_diaria":   pesos(tarifa_diaria),
         "dias_trabajados": dias_trabajados,
-        "salario_bruto":   round(bruto, 2),
+        "salario_bruto":   pesos(bruto),
         "salud":           0.0,
         "pension":         0.0,
-        "prestamo":        round(float(prestamo), 2),
-        "salario_neto":    round(neto, 2),
+        "prestamo":        pesos(prestamo),
+        "salario_neto":    pesos(neto),
     }
 
 
@@ -1324,8 +1328,8 @@ def guardar_nomina_prestacion(empresa_id, empleado_id, periodo, tarifa_diaria,
                 salario_bruto, salario_neto, observaciones)
             VALUES (?,?,?,98, ?,0,0, ?,?, 0,0,?, ?,?,?,?)
         """, (empresa_id, empleado_id, periodo, int(dias_trabajados),
-              float(bonificaciones), float(deducciones), float(prestamo),
-              float(tarifa_diaria), calc["salario_bruto"], calc["salario_neto"], obs))
+              pesos(bonificaciones), pesos(deducciones), pesos(prestamo),
+              pesos(tarifa_diaria), calc["salario_bruto"], calc["salario_neto"], obs))
         conn.commit()
         nomina_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -1353,7 +1357,7 @@ def guardar_nomina_contrato(empresa_id, empleado_id, periodo, valor_total,
         if existente:
             return False, "Ya existe una liquidación de contrato para este empleado en este período.", existente["id"]
 
-        salario_neto = valor_total - deducciones
+        salario_neto = pesos(D(valor_total) - D(deducciones))
         conn.execute("""
             INSERT INTO nominas (empresa_id, empleado_id, periodo, quincena, dias_trabajados,
                 horas_extras, valor_hora_extra, bonificaciones, deducciones,
@@ -1361,8 +1365,8 @@ def guardar_nomina_contrato(empresa_id, empleado_id, periodo, valor_total,
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             empresa_id, empleado_id, periodo, 99, 0,
-            0, 0, 0, deducciones,
-            0, 0, 0, valor_total, valor_total, salario_neto,
+            0, 0, 0, pesos(deducciones),
+            0, 0, 0, pesos(valor_total), pesos(valor_total), salario_neto,
             observaciones or "Liquidación de contrato"
         ))
         conn.commit()
@@ -1931,24 +1935,45 @@ AUXILIO_TRANSPORTE_2026 = 200_700  # Para empleados que ganan <= 2 SMLV
 DEDUCCION_SALUD_QUINCENA = 70_036
 DEDUCCION_PENSION_QUINCENA = 70_036
 
+# ─── Dinero exacto ────────────────────────────────────────────────────────────
+# Toda la aritmética monetaria se hace en Decimal y se cuantiza a 2 decimales
+# (centavos) con redondeo comercial antes de guardar/mostrar. Evita la deriva
+# binaria de float (0.1+0.2 ≠ 0.3) en montos de nómina.
+_CENT = Decimal("0.01")
+
+
+def D(x) -> Decimal:
+    """Convierte un monto a Decimal exacto (números, strings, None)."""
+    if isinstance(x, Decimal):
+        return x
+    if x is None or x == "":
+        return Decimal("0")
+    return Decimal(str(x))
+
+
+def pesos(x) -> float:
+    """Cuantiza un monto a centavos (ROUND_HALF_UP) y lo devuelve como float
+    listo para SQLite/formato de moneda."""
+    return float(D(x).quantize(_CENT, rounding=ROUND_HALF_UP))
+
 def _actualizar_cuota_prestamo(conn, empresa_id, empleado_id, monto_desc):
     """Descuenta monto_desc de los préstamos activos del empleado (del más antiguo al más nuevo)."""
     prestamos = conn.execute(
         "SELECT id, saldo, abonado FROM prestamos WHERE empresa_id=? AND empleado_id=? AND estado='activo' ORDER BY fecha ASC",
         (empresa_id, empleado_id)
     ).fetchall()
-    restante = monto_desc
+    restante = D(monto_desc)
     for p in prestamos:
         if restante <= 0:
             break
-        saldo_p = float(p["saldo"])
+        saldo_p = D(p["saldo"])
         abono   = min(restante, saldo_p)
         nuevo_saldo  = saldo_p - abono
-        nuevo_abonado= float(p["abonado"]) + abono
-        estado = "pagado" if nuevo_saldo <= 0.01 else "activo"
+        nuevo_abonado= D(p["abonado"]) + abono
+        estado = "pagado" if nuevo_saldo <= _CENT else "activo"
         conn.execute(
             "UPDATE prestamos SET abonado=?, saldo=?, estado=? WHERE id=?",
-            (nuevo_abonado, max(nuevo_saldo, 0), estado, p["id"]))
+            (pesos(nuevo_abonado), pesos(max(nuevo_saldo, Decimal("0"))), estado, p["id"]))
         restante -= abono
 
 
@@ -1959,32 +1984,32 @@ def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extr
     - Mensual: salario completo / 30 × días
     - Quincenal: salario_base / 2 es la base de 15 días
     """
-    salario_dia = salario_base / 30
+    salario_dia = D(salario_base) / 30
 
-    salario_proporcional = salario_dia * dias_trabajados
-    valor_horas_extras   = horas_extras * valor_hora_extra
-    salario_bruto        = salario_proporcional + valor_horas_extras + bonificaciones
+    salario_proporcional = salario_dia * D(dias_trabajados)
+    valor_horas_extras   = D(horas_extras) * D(valor_hora_extra)
+    salario_bruto        = salario_proporcional + valor_horas_extras + D(bonificaciones)
 
     # Deducciones fijas según período
-    salud = pension = 0
+    salud = pension = Decimal("0")
     if periodo_pago == 'quincenal':
         if quincena == 1:
-            salud   = DEDUCCION_SALUD_QUINCENA
+            salud   = D(DEDUCCION_SALUD_QUINCENA)
         elif quincena == 2:
-            pension = DEDUCCION_PENSION_QUINCENA
+            pension = D(DEDUCCION_PENSION_QUINCENA)
     else:
         # Mensual: se descuenta salud y pensión una vez cada una
-        salud   = DEDUCCION_SALUD_QUINCENA
-        pension = DEDUCCION_PENSION_QUINCENA
+        salud   = D(DEDUCCION_SALUD_QUINCENA)
+        pension = D(DEDUCCION_PENSION_QUINCENA)
 
-    salario_neto = salario_bruto - salud - pension - deducciones_adicionales - prestamo
+    salario_neto = salario_bruto - salud - pension - D(deducciones_adicionales) - D(prestamo)
 
     return {
-        "salario_bruto": round(salario_bruto, 2),
-        "salud":         round(salud, 2),
-        "pension":       round(pension, 2),
-        "prestamo":      round(prestamo, 2),
-        "salario_neto":  round(salario_neto, 2),
+        "salario_bruto": pesos(salario_bruto),
+        "salud":         pesos(salud),
+        "pension":       pesos(pension),
+        "prestamo":      pesos(prestamo),
+        "salario_neto":  pesos(salario_neto),
         "dias_base":     15 if periodo_pago == 'quincenal' else 30,
     }
 
@@ -2005,7 +2030,7 @@ def crear_prestamo(empresa_id, empleado_id, monto, fecha, observaciones=""):
     try:
         conn.execute(
             "INSERT INTO prestamos (empresa_id, empleado_id, monto, saldo, fecha, observaciones) VALUES (?,?,?,?,?,?)",
-            (empresa_id, empleado_id, monto, monto, fecha, observaciones)
+            (empresa_id, empleado_id, pesos(monto), pesos(monto), fecha, observaciones)
         )
         conn.commit()
         return True, "Préstamo registrado exitosamente."
@@ -2055,7 +2080,7 @@ def actualizar_prestamo(prestamo_id, monto, observaciones=""):
     try:
         conn.execute(
             "UPDATE prestamos SET monto=?, saldo=monto-abonado, observaciones=? WHERE id=?",
-            (monto, observaciones, prestamo_id)
+            (pesos(monto), observaciones, prestamo_id)
         )
         conn.commit()
         return True, "Préstamo actualizado."
@@ -2073,15 +2098,15 @@ def abonar_prestamo(prestamo_id, monto_abono):
         row = conn.execute("SELECT saldo FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
         if not row:
             return False, "Préstamo no encontrado."
-        saldo_actual = float(row["saldo"])
-        if monto_abono > saldo_actual:
+        saldo_actual = D(row["saldo"])
+        if D(monto_abono) > saldo_actual:
             return False, f"El abono (${monto_abono:,.0f}) supera el saldo pendiente (${saldo_actual:,.0f})."
-        nuevo_abonado = float(conn.execute("SELECT abonado FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()["abonado"]) + monto_abono
-        nuevo_saldo = saldo_actual - monto_abono
+        nuevo_abonado = D(conn.execute("SELECT abonado FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()["abonado"]) + D(monto_abono)
+        nuevo_saldo = saldo_actual - D(monto_abono)
         estado = "pagado" if nuevo_saldo <= 0 else "activo"
         conn.execute(
             "UPDATE prestamos SET abonado=?, saldo=?, estado=? WHERE id=?",
-            (nuevo_abonado, nuevo_saldo, estado, prestamo_id)
+            (pesos(nuevo_abonado), pesos(nuevo_saldo), estado, prestamo_id)
         )
         conn.commit()
         return True, f"Abono registrado. Saldo pendiente: ${nuevo_saldo:,.0f}"
@@ -2111,8 +2136,8 @@ def crear_contrato(empresa_id, empleado_id, descripcion, valor_total,
             INSERT INTO contratos (empresa_id, empleado_id, descripcion, valor_total,
                 fecha_inicio, fecha_fin, deducciones, observaciones, estado)
             VALUES (?,?,?,?,?,?,?,?,'activo')
-        """, (empresa_id, empleado_id, descripcion, valor_total,
-              fecha_inicio, fecha_fin, deducciones, observaciones))
+        """, (empresa_id, empleado_id, descripcion, pesos(valor_total),
+              fecha_inicio, fecha_fin, pesos(deducciones), observaciones))
         conn.commit()
         return True, "Contrato creado exitosamente."
     except Exception as e:
@@ -2162,8 +2187,8 @@ def actualizar_contrato(contrato_id, empresa_id, descripcion, valor_total,
             UPDATE contratos SET descripcion=?, valor_total=?, fecha_inicio=?,
                 fecha_fin=?, deducciones=?, observaciones=?
             WHERE id=? AND empresa_id=? AND estado='activo'
-        """, (descripcion, valor_total, fecha_inicio, fecha_fin,
-              deducciones, observaciones, contrato_id, empresa_id))
+        """, (descripcion, pesos(valor_total), fecha_inicio, fecha_fin,
+              pesos(deducciones), observaciones, contrato_id, empresa_id))
         conn.commit()
         return True, "Contrato actualizado."
     except Exception as e:
@@ -2188,17 +2213,17 @@ def liquidar_contrato(contrato_id, empresa_id, valor_final=None,
         if cont["estado"] == "liquidado":
             return False, "Este contrato ya fue liquidado.", None
 
-        val   = valor_final   if valor_final   is not None else float(cont["valor_total"])
-        ded   = deducciones_final if deducciones_final is not None else float(cont["deducciones"])
+        val   = D(valor_final)   if valor_final   is not None else D(cont["valor_total"])
+        ded   = D(deducciones_final) if deducciones_final is not None else D(cont["deducciones"])
 
         # Manejar préstamos activos
-        prestamo_desc = 0.0
+        prestamo_desc = Decimal("0")
         if descontar_prestamos:
             prestamos = conn.execute(
                 "SELECT id, saldo FROM prestamos WHERE empresa_id=? AND empleado_id=? AND estado='activo'",
                 (empresa_id, cont["empleado_id"])).fetchall()
             for p in prestamos:
-                prestamo_desc += float(p["saldo"])
+                prestamo_desc += D(p["saldo"])
                 # Marcar préstamo como pagado
                 conn.execute(
                     "UPDATE prestamos SET abonado=monto, saldo=0, estado='pagado' WHERE id=?",
@@ -2217,14 +2242,14 @@ def liquidar_contrato(contrato_id, empresa_id, valor_final=None,
                 salario_bruto, salario_neto, observaciones)
             VALUES (?,?,?,99, 0,0,0,0, ?,0,0,?, ?,?,?,?)
         """, (empresa_id, cont["empleado_id"], periodo,
-              ded, prestamo_desc, val, val, neto, obs))
+              pesos(ded), pesos(prestamo_desc), pesos(val), pesos(val), pesos(neto), obs))
         nomina_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         conn.execute("""
             UPDATE contratos SET estado='liquidado', nomina_id=?,
                 valor_total=?, deducciones=?, observaciones=?
             WHERE id=?
-        """, (nomina_id, val, ded + prestamo_desc, obs, contrato_id))
+        """, (nomina_id, pesos(val), pesos(ded + prestamo_desc), obs, contrato_id))
         conn.commit()
         return True, "Contrato liquidado exitosamente.", nomina_id
     except Exception as e:

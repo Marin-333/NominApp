@@ -130,6 +130,19 @@ check("sin sesión = sin acceso", (db.cerrar_sesion() or True) and _denegado(
     lambda: db.listar_empleados(EID)))
 db.establecer_sesion(u)   # volver a superadmin para el resto del test
 
+# ── Exactitud decimal en montos (Fase 2) ───────────────────────────────────
+calc_dec = db.calcular_nomina(1234567.89, 13, 2.5, 15432.10, 333333.33, 11111.11,
+                              periodo_pago='mensual', prestamo=5000.55)
+check("decimal: bruto-neto exacto",
+      round(calc_dec["salario_bruto"] - calc_dec["salud"] - calc_dec["pension"]
+            - 11111.11 - 5000.55, 2) == calc_dec["salario_neto"])
+check("decimal: resultados a 2 decimales", all(
+    round(v, 2) == v for v in calc_dec.values() if isinstance(v, float)))
+calc_prest = db.calcular_pago_prestacion(123456.78, 7, 100.5, 50.25, 0)
+check("decimal prestacion",
+      calc_prest["salario_neto"] ==
+      round(calc_prest["salario_bruto"] - 50.25, 2))
+
 # Empleados
 ok, msg = db.crear_empleado(EID, "Juan Perez", "1001", "Operario", 2000000, "2024-01-15",
                             "Ahorros", "123456", 35, "salario", None, "juan@test.com")

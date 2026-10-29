@@ -3119,6 +3119,36 @@ def marcar_documento_dian(doc_id, estado, respuesta=None):
     return True, f"Documento marcado como '{estado}'."
 
 
+def transmitir_documento_dian(doc_id):
+    """Envía el documento por el canal de transmisión (dian_service).
+    En modo simulado local marca el envío como recibido; cuando haya
+    proveedor real la respuesta será el ApplicationResponse de la DIAN."""
+    import dian_service
+    conn = get_connection()
+    _verificar_scope_registro(conn, "documentos_dian", doc_id)
+    doc = conn.execute(
+        "SELECT * FROM documentos_dian WHERE id=?", (doc_id,)).fetchone()
+    if not doc:
+        conn.close()
+        return False, "Documento no encontrado."
+    doc = dict(doc)
+    if doc["estado"] not in ("generado", "rechazado"):
+        conn.close()
+        return False, f"El documento está '{doc['estado']}'; no se puede reenviar."
+    xml = ""
+    try:
+        if doc.get("xml_path") and os.path.exists(doc["xml_path"]):
+            xml = open(doc["xml_path"], encoding="utf-8").read()
+    except Exception:
+        pass
+    ok, estado, respuesta = dian_service.transmitir_documento(doc, xml)
+    conn.close()
+    ok2, msg = marcar_documento_dian(doc_id, estado, respuesta)
+    if ok and ok2:
+        return True, respuesta
+    return False, respuesta
+
+
 def generar_nota_ajuste(doc_id, motivo):
     """Genera una Nota de Ajuste sobre un documento transmitido: referencia
     el CUNE original y registra el nuevo documento tipo 'ajuste'."""

@@ -316,6 +316,12 @@ check("nota de ajuste generada", ok, msg)
 na = db.obtener_documento_dian(naid)
 check("nota referencia origen", na["tipo"] == "ajuste" and
       na["doc_origen_id"] == docid)
+# Transmisión simulada (modo local, sin proveedor — dian_service.py)
+ok, msg = db.transmitir_documento_dian(naid)
+check("transmitir simulado", ok and "SIMULADO" in msg, msg)
+na2 = db.obtener_documento_dian(naid)
+check("estado transmitido simulado",
+      na2["estado"] == "transmitido" and na2["fecha_envio"] is not None)
 # Plazo: período 2026-09 → límite 2026-10-10
 check("fecha límite día 10",
       db.fecha_limite_dian("2026-09").strftime("%Y-%m-%d") == "2026-10-10")

@@ -70,7 +70,8 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [x] Check de conectividad (`verificar_conectividad`, HEAD request con timeout) + validador `empleados_sin_datos_dian` que lista los campos faltantes por empleado
 - [x] Alerta de plazo en la sección DIAN: días restantes hasta el día 10 del mes siguiente (`fecha_limite_dian`/`dias_plazo_dian`)
 - [x] Backup/export actualizados: las nuevas tablas viajan en el backup de empresa (con remapeo de ids y de `doc_origen_id`); el borrado definitivo de empleado maneja la FK de `documentos_dian`
-- [ ] **Transmisión real**: proveedor tecnológico vs directo sigue como decisión pendiente — por ahora los estados se marcan manualmente (transmitido/aceptado/rechazado + respuesta); falta firma XMLDSig/XAdES-BES, `SendNominaSync`/`GetStatus` o API del proveedor, y credenciales en config externo
+- [x] Puente de transmisión `dian_service.py` en **modo simulado local**: `transmitir_documento_dian` recorre el flujo real (generado → transmitido → aceptado/rechazado) con respuestas simuladas; al contratar proveedor solo se cambia la función `transmitir_documento()` — los puntos de integración están marcados con `INTEGRAR:` (decisión documentada con Gemini: sin inversión hasta producción)
+- [ ] **Transmisión real**: proveedor tecnológico vs directo sigue como decisión pendiente — falta firma XMLDSig/XAdES-BES, `SendNominaSync`/`GetStatus` o API del proveedor, y credenciales en config externo
 - [ ] QR + CUNE en la representación gráfica PDF del documento mensual
 - [ ] XML de notas de ajuste con estructura `NominaIndividualDeAjuste` completa (hoy es el documento estándar + nota de referencia)
 

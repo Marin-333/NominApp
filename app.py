@@ -2198,7 +2198,7 @@ class AdminWin(BaseWin):
             [("ID",35),("Número",90),("Empleado",170),("Período",80),("Tipo",70),
              ("CUNE",130),("Ambiente",90),("Estado",90),("Envío",140)])
         fr2 = tk.Frame(self.ct,bg=C["bg"]); fr2.pack(padx=24,anchor="w",pady=(4,18))
-        Btn(fr2,"Marcar transmitido",cmd=lambda:self._dian_marcar("transmitido"),sty="out",icon="📤").pack(side="left",padx=(0,8))
+        Btn(fr2,"Transmitir",cmd=self._dian_transmitir,sty="pri",icon="📤").pack(side="left",padx=(0,8))
         Btn(fr2,"Marcar aceptado",cmd=lambda:self._dian_marcar("aceptado"),sty="ok",icon="✅").pack(side="left",padx=(0,8))
         Btn(fr2,"Marcar rechazado",cmd=lambda:self._dian_marcar("rechazado"),sty="err",icon="⛔").pack(side="left",padx=(0,8))
         Btn(fr2,"Nota de ajuste",cmd=self._dian_nota_ajuste,sty="out",icon="📝").pack(side="left",padx=(0,8))
@@ -2279,6 +2279,16 @@ class AdminWin(BaseWin):
         if errs:  msg+="\n\nErrores:\n"+"\n".join(errs[:6])
         messagebox.showinfo("Generación DIAN",msg,parent=self)
         self._load_dian()
+
+    def _dian_transmitir(self):
+        did=self._sel(self.tv_dian,"documento")
+        if did is None: return
+        try:
+            ok,msg=db.transmitir_documento_dian(did)
+            (messagebox.showinfo if ok else messagebox.showerror)(
+                "Transmisión DIAN",msg,parent=self)
+            self._load_dian()
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
 
     def _dian_marcar(self, estado):
         did=self._sel(self.tv_dian,"documento")

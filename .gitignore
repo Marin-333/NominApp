@@ -1,0 +1,25 @@
+# Datos en vivo (NO versionar — contienen info sensible de empleados)
+nomina.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db-corrupta-*
+reports/
+logos/
+fotos/
+backups/
+logs/
+*.log
+
+# Build PyInstaller
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Otros
+nul
+.env

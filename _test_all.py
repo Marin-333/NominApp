@@ -1,5 +1,6 @@
 """Script de pruebas exhaustivo — usa BD temporal, no toca nomina.db real."""
 import os, sys, tempfile, traceback
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 TMP = tempfile.mkdtemp(prefix="nomina_test_")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -258,6 +259,73 @@ check("admin NO lista novedades ajenas", _denegado(
 db.establecer_sesion(u)
 ok, msg = db.eliminar_novedad(NOVID)
 check("eliminar novedad", ok and db.listar_novedades(EID) == [])
+
+# ── DIAN — documento mensual, CUNE, XML (Fase 5) ───────────────────────────
+# Config
+ok, msg = db.guardar_config_dian(EID, "NE", 0, "habilitacion", "soft-123", "PIN-abc")
+check("guardar config dian", ok, msg)
+cfg = db.obtener_config_dian(EID)
+check("config dian leída",
+      cfg["prefijo"] == "NE" and cfg["ambiente"] == "habilitacion")
+# Datos DIAN del empleado (restauramos cuenta bancaria que el update previo borró)
+db.actualizar_empleado(E1, EID, "Juan P", "1001", "Op", 2100000, "2024-01-15",
+                       "Ahorros", "123456")
+ok, msg = db.actualizar_empleado_dian(E1, EID, eps="EPS01", arl="ARL02",
+    fondo_pension="FP01", fondo_cesantias="FC01", banco="51",
+    municipio_laboral="05001", tipo_trabajador="01", tipo_contrato="2")
+check("actualizar empleado dian", ok, msg)
+e1d = db.obtener_empleado(E1, EID)
+check("campos dian persistidos",
+      e1d["eps"] == "EPS01" and e1d["primer_nombre"] == "Juan" and
+      e1d["tipo_documento"] == "13")
+falt = db.validar_empleado_dian(e1d)
+check("empleado E1 completo DIAN", falt == [], falt)
+sin_datos = db.empleados_sin_datos_dian(EID)
+check("empleados incompletos detectados", any(n == "Ana Prest" for n, _ in sin_datos))
+# Documento mensual: E1 tiene nómina 2026-09 (y otra con préstamo más abajo no;
+# generamos sobre 2026-09 que ya incluye Q y mensual agregadas)
+ok, msg, docid, warns = db.generar_documento_dian(EID, E1, "2026-09")
+check("generar documento dian", ok, msg)
+doc = db.obtener_documento_dian(docid)
+check("doc cune generado", doc["cune"] and len(doc["cune"]) == 96)
+check("doc xml existe", os.path.exists(doc["xml_path"]))
+check("doc estado inicial", doc["estado"] == "generado" and
+      doc["ambiente"] == "habilitacion")
+check("consecutivo avanzó", db.obtener_config_dian(EID)["consecutivo"] == 1)
+xml_txt = open(doc["xml_path"], encoding="utf-8").read()
+for frag in ("NominaIndividual", "<NIT>900111</NIT>", "<PrimerNombre>Juan",
+             "DevengadosTotal", "DeduccionesTotal", "ComprobanteTotal",
+             "<FondoPension>", "<Transporte>"):
+    check(f"xml contiene {frag[:24]}", frag in xml_txt)
+ok, msg, _, _ = db.generar_documento_dian(EID, E1, "2026-09")
+check("documento duplicado rechazado", not ok)
+# Generación masiva: E1 ya existe (omitido), E2 (prestación, con nómina) se genera
+n_docs, skips, errs = db.generar_documentos_periodo(EID, "2026-09")
+check("generar documentos período", n_docs == 1 and len(skips) >= 1,
+      f"n={n_docs} skips={skips} errs={errs}")
+# Estados de transmisión (manual hasta integración real)
+ok, msg = db.marcar_documento_dian(docid, "transmitido")
+check("marcar transmitido", ok and
+      db.obtener_documento_dian(docid)["fecha_envio"] is not None)
+ok, msg = db.marcar_documento_dian(docid, "aceptado", "OK DIAN")
+check("marcar aceptado", ok and
+      db.obtener_documento_dian(docid)["estado"] == "aceptado")
+# Nota de ajuste sobre el documento transmitido
+ok, msg, naid = db.generar_nota_ajuste(docid, "Corrección de horas extras")
+check("nota de ajuste generada", ok, msg)
+na = db.obtener_documento_dian(naid)
+check("nota referencia origen", na["tipo"] == "ajuste" and
+      na["doc_origen_id"] == docid)
+# Plazo: período 2026-09 → límite 2026-10-10
+check("fecha límite día 10",
+      db.fecha_limite_dian("2026-09").strftime("%Y-%m-%d") == "2026-10-10")
+# Scope: admin de EID no toca documentos de EID2
+db.establecer_sesion(adm)
+check("admin NO genera doc ajeno", _denegado(
+    lambda: db.generar_documento_dian(EID2, E1, "2026-09")))
+check("admin NO lista docs ajenos", _denegado(
+    lambda: db.listar_documentos_dian(EID2)))
+db.establecer_sesion(u)
 
 # Contratos
 ok, msg = db.crear_contrato(EID, E2, "Contrato obra", 5000000, "2026-09-01", "2026-12-31", 100000, "obs")

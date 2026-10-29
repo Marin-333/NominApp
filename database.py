@@ -11,10 +11,13 @@ import ctypes
 import ctypes.wintypes
 import shutil
 import bcrypt
+import urllib.request
+import xml.etree.ElementTree as ET
+import xml.dom.minidom
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from paths import DB_PATH, BACKUP_DIR, APP_VERSION
+from paths import DB_PATH, BACKUP_DIR, APP_VERSION, get_reports_dir
 
 SCHEMA_VERSION = 1
 MAX_AUTOBACKUPS = 10
@@ -500,6 +503,38 @@ def init_db():
             creado_en       TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS config_dian (
+            empresa_id      INTEGER PRIMARY KEY REFERENCES empresas(id) ON DELETE CASCADE,
+            prefijo         TEXT DEFAULT 'NE',
+            consecutivo     INTEGER DEFAULT 0,
+            ambiente        TEXT DEFAULT 'habilitacion'
+                            CHECK(ambiente IN ('habilitacion','produccion')),
+            software_id     TEXT,
+            software_pin    TEXT,
+            actualizado_en  TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS documentos_dian (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id      INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+            empleado_id     INTEGER NOT NULL REFERENCES empleados(id),
+            periodo         TEXT NOT NULL,
+            tipo            TEXT NOT NULL DEFAULT 'nomina'
+                            CHECK(tipo IN ('nomina','ajuste')),
+            prefijo         TEXT,
+            numero          TEXT,
+            cune            TEXT,
+            xml_path        TEXT,
+            ambiente        TEXT,
+            estado          TEXT DEFAULT 'generado'
+                            CHECK(estado IN ('generado','transmitido','aceptado','rechazado')),
+            fecha_envio     TEXT,
+            fecha_respuesta TEXT,
+            respuesta       TEXT,
+            doc_origen_id   INTEGER REFERENCES documentos_dian(id),
+            creado_en       TEXT DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             clave   TEXT PRIMARY KEY,
             valor   TEXT
@@ -680,6 +715,57 @@ def migrar_base_datos():
             (2025, 1423500, 200000, 49799, 4.0, 4.0, 1.0, 4.0),
             (2026, 1750905, 249095, 52374, 4.0, 4.0, 1.0, 4.0)
     """)
+
+    # Fase 5 — campos DIAN en empresas y empleados
+    for ddl in (
+        "ALTER TABLE empresas ADD COLUMN departamento TEXT",
+        "ALTER TABLE empresas ADD COLUMN municipio TEXT",
+        "ALTER TABLE empresas ADD COLUMN pais TEXT DEFAULT 'CO'",
+        "ALTER TABLE empleados ADD COLUMN primer_nombre TEXT",
+        "ALTER TABLE empleados ADD COLUMN otros_nombres TEXT",
+        "ALTER TABLE empleados ADD COLUMN primer_apellido TEXT",
+        "ALTER TABLE empleados ADD COLUMN segundo_apellido TEXT",
+        "ALTER TABLE empleados ADD COLUMN tipo_documento TEXT DEFAULT '13'",
+        "ALTER TABLE empleados ADD COLUMN tipo_trabajador TEXT DEFAULT '01'",
+        "ALTER TABLE empleados ADD COLUMN subtipo_trabajador TEXT DEFAULT '00'",
+        "ALTER TABLE empleados ADD COLUMN tipo_contrato TEXT DEFAULT '1'",
+        "ALTER TABLE empleados ADD COLUMN municipio_laboral TEXT",
+        "ALTER TABLE empleados ADD COLUMN alto_riesgo_pension INTEGER DEFAULT 0",
+        "ALTER TABLE empleados ADD COLUMN eps TEXT",
+        "ALTER TABLE empleados ADD COLUMN arl TEXT",
+        "ALTER TABLE empleados ADD COLUMN fondo_pension TEXT",
+        "ALTER TABLE empleados ADD COLUMN fondo_cesantias TEXT",
+        "ALTER TABLE empleados ADD COLUMN banco TEXT",
+        "ALTER TABLE empleados ADD COLUMN fecha_retiro TEXT",
+    ):
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    # Repartir nombres existentes en campos DIAN (heurística simple:
+    # primer token → primer_nombre, último → primer_apellido, resto → otros_nombres)
+    rows = c.execute(
+        "SELECT id, nombre FROM empleados WHERE primer_nombre IS NULL").fetchall()
+    for rid, nombre in rows:
+        toks = [t for t in (nombre or "").strip().split() if t]
+        pn = toks[0] if toks else ""
+        pa = toks[-1] if len(toks) > 1 else ""
+        on = " ".join(toks[1:-1]) if len(toks) > 2 else ""
+        c.execute(
+            "UPDATE empleados SET primer_nombre=?, otros_nombres=?, primer_apellido=? WHERE id=?",
+            (pn, on or None, pa, rid))
+
+    # Un solo documento de nómina por empleado y período (las notas de
+    # ajuste sí pueden ser varias por documento)
+    try:
+        c.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_doc_dian_nomina
+            ON documentos_dian(empresa_id, empleado_id, periodo)
+            WHERE tipo='nomina'
+        """)
+    except sqlite3.OperationalError:
+        pass
     try:
         c.execute("ALTER TABLE empresas ADD COLUMN correo_password TEXT")
     except sqlite3.OperationalError:
@@ -751,7 +837,7 @@ def migrar_base_datos():
 # ─── EMPRESAS ────────────────────────────────────────────────────────────────
 
 def crear_empresa(nombre, nit, direccion, telefono, logo_path=None, periodo_pago='mensual',
-                  correo=None, correo_password=None):
+                  correo=None, correo_password=None, departamento=None, municipio=None):
     _requerir_rol("superadmin")
     if correo_password:
         correo_password = cifrar_secreto(correo_password)
@@ -759,8 +845,10 @@ def crear_empresa(nombre, nit, direccion, telefono, logo_path=None, periodo_pago
     try:
         conn.execute(
             """INSERT INTO empresas (nombre, nit, direccion, telefono, logo_path,
-               periodo_pago, correo, correo_password) VALUES (?,?,?,?,?,?,?,?)""",
-            (nombre, nit, direccion, telefono, logo_path, periodo_pago, correo, correo_password)
+               periodo_pago, correo, correo_password, departamento, municipio)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (nombre, nit, direccion, telefono, logo_path, periodo_pago, correo,
+             correo_password, departamento, municipio)
         )
         conn.commit()
         return True, "Empresa creada exitosamente."
@@ -787,7 +875,8 @@ def obtener_empresa(empresa_id):
 
 
 def actualizar_empresa(empresa_id, nombre, nit, direccion, telefono, logo_path=None,
-                       periodo_pago='mensual', correo=None, correo_password=None):
+                       periodo_pago='mensual', correo=None, correo_password=None,
+                       departamento=None, municipio=None):
     _requerir_rol("superadmin")
     if correo_password:
         correo_password = cifrar_secreto(correo_password)
@@ -795,9 +884,10 @@ def actualizar_empresa(empresa_id, nombre, nit, direccion, telefono, logo_path=N
     try:
         conn.execute(
             """UPDATE empresas SET nombre=?, nit=?, direccion=?, telefono=?, logo_path=?,
-               periodo_pago=?, correo=?, correo_password=? WHERE id=?""",
+               periodo_pago=?, correo=?, correo_password=?, departamento=?, municipio=?
+               WHERE id=?""",
             (nombre, nit, direccion, telefono, logo_path, periodo_pago,
-             correo, correo_password, empresa_id)
+             correo, correo_password, departamento, municipio, empresa_id)
         )
         conn.commit()
         return True, "Empresa actualizada."
@@ -1032,20 +1122,39 @@ def autenticar(username, password):
 
 # ─── EMPLEADOS ───────────────────────────────────────────────────────────────
 
+def _split_nombre(nombre):
+    """Reparte un nombre completo en (primer_nombre, otros_nombres,
+    primer_apellido) — heurística usada para campos DIAN."""
+    toks = [t for t in (nombre or "").split() if t]
+    return (toks[0] if toks else None,
+            " ".join(toks[1:-1]) if len(toks) > 2 else None,
+            toks[-1] if len(toks) > 1 else None)
+
+
 def crear_empleado(empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
                    tipo_cuenta=None, numero_cuenta=None, edad=None,
-                   tipo_vinculacion='salario', tarifa_diaria=None, correo=None):
+                   tipo_vinculacion='salario', tarifa_diaria=None, correo=None,
+                   dian=None):
     _verificar_scope_empresa(empresa_id)
+    dian = {k: v for k, v in (dian or {}).items() if k in _EMP_DIAN_COLS}
+    pn, on, pa = _split_nombre(nombre)
+    if not dian.get("primer_nombre"):   dian["primer_nombre"] = pn
+    if not dian.get("otros_nombres") and on:  dian["otros_nombres"] = on
+    if not dian.get("primer_apellido"): dian["primer_apellido"] = pa
+    cols = list(dian.keys()); vals = list(dian.values())
+    extra_cols = (", " + ", ".join(cols)) if cols else ""
+    extra_marks = ("," + ",".join("?" * len(cols))) if cols else ""
     conn = get_connection()
     try:
         conn.execute(
-            """INSERT INTO empleados (empresa_id, nombre, documento, cargo, salario,
+            f"""INSERT INTO empleados (empresa_id, nombre, documento, cargo, salario,
                fecha_ingreso, tipo_cuenta, numero_cuenta, edad,
-               tipo_vinculacion, tarifa_diaria, correo)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               tipo_vinculacion, tarifa_diaria, correo{extra_cols})
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?{extra_marks})""",
             (empresa_id, nombre, documento, cargo, pesos(salario), fecha_ingreso,
              tipo_cuenta, numero_cuenta, edad, tipo_vinculacion,
-             pesos(tarifa_diaria) if tarifa_diaria else tarifa_diaria, correo)
+             pesos(tarifa_diaria) if tarifa_diaria else tarifa_diaria, correo,
+             *vals)
         )
         conn.commit()
         return True, "Empleado registrado exitosamente."
@@ -1067,19 +1176,27 @@ def obtener_empleado(empleado_id, empresa_id):
 
 def actualizar_empleado(emp_id, empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
                         tipo_cuenta=None, numero_cuenta=None, edad=None,
-                        tipo_vinculacion='salario', tarifa_diaria=None, correo=None):
+                        tipo_vinculacion='salario', tarifa_diaria=None, correo=None,
+                        dian=None):
     _verificar_scope_empresa(empresa_id)
+    dian = {k: v for k, v in (dian or {}).items() if k in _EMP_DIAN_COLS}
+    if dian:
+        pn, on, pa = _split_nombre(nombre)
+        if not dian.get("primer_nombre"):   dian["primer_nombre"] = pn
+        if not dian.get("otros_nombres") and on:  dian["otros_nombres"] = on
+        if not dian.get("primer_apellido"): dian["primer_apellido"] = pa
+    extra_sets = (", " + ", ".join(f"{k}=?" for k in dian)) if dian else ""
     conn = get_connection()
     try:
         conn.execute(
-            """UPDATE empleados SET nombre=?, documento=?, cargo=?, salario=?,
+            f"""UPDATE empleados SET nombre=?, documento=?, cargo=?, salario=?,
                fecha_ingreso=?, tipo_cuenta=?, numero_cuenta=?, edad=?,
-               tipo_vinculacion=?, tarifa_diaria=?, correo=?
+               tipo_vinculacion=?, tarifa_diaria=?, correo=?{extra_sets}
                WHERE id=? AND empresa_id=?""",
             (nombre, documento, cargo, pesos(salario), fecha_ingreso,
              tipo_cuenta, numero_cuenta, edad, tipo_vinculacion,
              pesos(tarifa_diaria) if tarifa_diaria else tarifa_diaria, correo,
-             emp_id, empresa_id)
+             *dian.values(), emp_id, empresa_id)
         )
         conn.commit()
         return True, "Empleado actualizado."
@@ -1106,16 +1223,30 @@ def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False):
     try:
         # Verificar si existen nóminas asociadas
         nominas_count = conn.execute(
-            "SELECT COUNT(*) FROM nominas WHERE empleado_id=? AND empresa_id=?", 
+            "SELECT COUNT(*) FROM nominas WHERE empleado_id=? AND empresa_id=?",
             (emp_id, empresa_id)
         ).fetchone()[0]
-        
-        if nominas_count > 0 and not eliminar_nominas:
-            return False, f"El empleado tiene {nominas_count} registros de nómina. Debe decidir qué hacer con estos registros."
-        
-        # Eliminar registros de nómina si se solicita
+        docs_count = conn.execute(
+            "SELECT COUNT(*) FROM documentos_dian WHERE empleado_id=? AND empresa_id=?",
+            (emp_id, empresa_id)
+        ).fetchone()[0]
+
+        if (nominas_count > 0 or docs_count > 0) and not eliminar_nominas:
+            detalle = f"{nominas_count} nómina(s)"
+            if docs_count:
+                detalle += f" y {docs_count} documento(s) DIAN"
+            return False, (f"El empleado tiene {detalle}. Debe decidir qué hacer "
+                           "con estos registros.")
+
+        # Eliminar registros de nómina (y documentos DIAN, que referencian al
+        # empleado por FK) si se solicita — los XML quedan en disco
         if eliminar_nominas:
-            conn.execute("DELETE FROM nominas WHERE empleado_id=? AND empresa_id=?", (emp_id, empresa_id))
+            conn.execute("DELETE FROM nominas WHERE empleado_id=? AND empresa_id=?",
+                         (emp_id, empresa_id))
+            if docs_count:
+                conn.execute(
+                    "DELETE FROM documentos_dian WHERE empleado_id=? AND empresa_id=?",
+                    (emp_id, empresa_id))
         
         # Eliminar al empleado
         cur = conn.execute("DELETE FROM empleados WHERE id=? AND empresa_id=?", (emp_id, empresa_id))
@@ -1726,6 +1857,7 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
                 nombre TEXT NOT NULL, nit TEXT, direccion TEXT, telefono TEXT,
                 logo_path TEXT, periodo_pago TEXT DEFAULT 'mensual',
                 correo TEXT, correo_password TEXT,
+                departamento TEXT, municipio TEXT, pais TEXT DEFAULT 'CO',
                 creado_en TEXT DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS empleados (
@@ -1734,6 +1866,12 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
                 cargo TEXT NOT NULL, salario REAL NOT NULL, fecha_ingreso TEXT,
                 tipo_cuenta TEXT, numero_cuenta TEXT, edad INTEGER, correo TEXT,
                 tipo_vinculacion TEXT DEFAULT 'salario', tarifa_diaria REAL, valor_contrato REAL,
+                primer_nombre TEXT, otros_nombres TEXT, primer_apellido TEXT,
+                segundo_apellido TEXT, tipo_documento TEXT DEFAULT '13',
+                tipo_trabajador TEXT DEFAULT '01', subtipo_trabajador TEXT DEFAULT '00',
+                tipo_contrato TEXT DEFAULT '1', municipio_laboral TEXT,
+                alto_riesgo_pension INTEGER DEFAULT 0, eps TEXT, arl TEXT,
+                fondo_pension TEXT, fondo_cesantias TEXT, banco TEXT, fecha_retiro TEXT,
                 activo INTEGER DEFAULT 1, creado_en TEXT DEFAULT (datetime('now')),
                 UNIQUE(empresa_id, documento)
             );
@@ -1743,9 +1881,32 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
                 periodo TEXT NOT NULL, quincena INTEGER DEFAULT 0,
                 dias_trabajados INTEGER, horas_extras REAL, valor_hora_extra REAL,
                 bonificaciones REAL, deducciones REAL, salud REAL, pension REAL,
+                fsp REAL DEFAULT 0, ibc REAL, auxilio_transporte REAL DEFAULT 0,
                 prestamo REAL DEFAULT 0, salario_base REAL, salario_bruto REAL,
                 salario_neto REAL, observaciones TEXT, colilla_path TEXT,
                 generado_en TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS novedades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa_id INTEGER NOT NULL, empleado_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL, fecha_inicio TEXT NOT NULL, fecha_fin TEXT,
+                valor REAL, observaciones TEXT, estado TEXT DEFAULT 'activa',
+                creado_en TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS config_dian (
+                empresa_id INTEGER PRIMARY KEY, prefijo TEXT DEFAULT 'NE',
+                consecutivo INTEGER DEFAULT 0, ambiente TEXT DEFAULT 'habilitacion',
+                software_id TEXT, software_pin TEXT,
+                actualizado_en TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS documentos_dian (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa_id INTEGER NOT NULL, empleado_id INTEGER NOT NULL,
+                periodo TEXT NOT NULL, tipo TEXT DEFAULT 'nomina', prefijo TEXT,
+                numero TEXT, cune TEXT, xml_path TEXT, ambiente TEXT,
+                estado TEXT DEFAULT 'generado', fecha_envio TEXT,
+                fecha_respuesta TEXT, respuesta TEXT, doc_origen_id INTEGER,
+                creado_en TEXT DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS prestamos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1817,6 +1978,9 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
         _copy_table("prestamos", "empresa_id", empresa_id)
         _copy_table("bitacora",  "empresa_id", empresa_id)
         _copy_table("contratos", "empresa_id", empresa_id)
+        _copy_table("novedades", "empresa_id", empresa_id)
+        _copy_table("config_dian", "empresa_id", empresa_id)
+        _copy_table("documentos_dian", "empresa_id", empresa_id)
 
         conn_dst.commit()
         conn_dst.close()
@@ -1886,8 +2050,10 @@ def importar_backup_empresa(empresa_id, ruta_origen, password=None):
             conn_src.close(); conn_dst.close()
             return False, "El archivo de backup no contiene datos de esta empresa."
 
-        # Borrar datos actuales de la empresa
-        for tbl in ("bitacora","prestamos","contratos","nominas","empleados"):
+        # Borrar datos actuales de la empresa (documentos/novedades antes que
+        # empleados por las FK)
+        for tbl in ("bitacora","documentos_dian","novedades","config_dian",
+                    "prestamos","contratos","nominas","empleados"):
             try:
                 conn_dst.execute(f"DELETE FROM {tbl} WHERE empresa_id=?", (empresa_id,))
             except Exception:
@@ -1965,6 +2131,33 @@ def importar_backup_empresa(empresa_id, ruta_origen, password=None):
             row.pop("id", None)
             row["empresa_id"] = empresa_id
             _insert("bitacora", row)
+
+        for row in _get_rows(conn_src, "novedades", "empresa_id", empresa_id):
+            row.pop("id", None)
+            row["empresa_id"] = empresa_id
+            row["empleado_id"] = emp_map.get(row.get("empleado_id"))
+            if row["empleado_id"] is None:
+                continue
+            _insert("novedades", row)
+
+        for row in _get_rows(conn_src, "config_dian", "empresa_id", empresa_id):
+            row["empresa_id"] = empresa_id
+            _insert("config_dian", row)
+
+        doc_map = {}  # documentos_dian: id_viejo -> id_nuevo (para doc_origen_id)
+        docs_src = sorted(
+            _get_rows(conn_src, "documentos_dian", "empresa_id", empresa_id),
+            key=lambda r: r.get("id") or 0)
+        for row in docs_src:
+            old_id = row.pop("id", None)
+            row["empresa_id"] = empresa_id
+            row["empleado_id"] = emp_map.get(row.get("empleado_id"))
+            row["doc_origen_id"] = doc_map.get(row.get("doc_origen_id"))
+            if row["empleado_id"] is None:
+                continue
+            new_id = _insert("documentos_dian", row)
+            if old_id is not None and new_id is not None:
+                doc_map[old_id] = new_id
 
         conn_dst.commit()
         conn_src.close(); conn_dst.close()
@@ -2172,6 +2365,586 @@ def eliminar_novedad(novedad_id):
     conn.commit()
     conn.close()
     return True, "Novedad eliminada."
+
+
+# ─── DIAN — NÓMINA ELECTRÓNICA (Fase 5) ──────────────────────────────────────
+# Base de datos y generación del Documento Soporte de Pago de Nómina
+# Electrónica (Resolución 000013 de 2021 + Anexo Técnico). La estructura XML
+# generada es la del anexo v1.0 y DEBE validarse contra el set de pruebas
+# del ambiente de habilitación antes de producción.
+
+TIPOS_DOCUMENTO_DIAN = {
+    "13": "CC — Cédula de ciudadanía",
+    "22": "CE — Cédula de extranjería",
+    "41": "Pasaporte",
+    "42": "Doc. identificación extranjero",
+    "47": "PEP — Permiso especial",
+}
+TIPOS_TRABAJADOR_DIAN = {
+    "01": "Dependiente",
+    "02": "Servicio doméstico",
+    "04": "Madre comunitaria",
+    "12": "Aprendiz SENA — etapa lectiva",
+    "19": "Aprendiz SENA — etapa productiva",
+    "22": "Docente oficial",
+    "23": "Residente / postgrado en salud",
+    "57": "Independiente",
+}
+SUBTIPOS_TRABAJADOR_DIAN = {
+    "00": "No aplica",
+    "01": "Dependiente pensionado por vejez activo",
+    "02": "Independiente pensionado por vejez activo",
+    "03": "No obligado a pensiones por discapacidad",
+    "04": "Pensionado fuerzas militares",
+    "05": "Pensionado policía nacional",
+}
+TIPOS_CONTRATO_DIAN = {
+    "1": "Término fijo",
+    "2": "Término indefinido",
+    "3": "Obra o labor contratada",
+    "4": "Aprendizaje",
+    "5": "Prácticas laborales",
+}
+METODOS_PAGO_DIAN = {
+    "10": "Débito bancario",
+    "42": "Consignación bancaria",
+    "20": "Tarjeta débito",
+    "1":  "Efectivo",
+}
+
+# Campos DIAN editables del maestro de empleados
+_EMP_DIAN_COLS = (
+    "primer_nombre", "otros_nombres", "primer_apellido", "segundo_apellido",
+    "tipo_documento", "tipo_trabajador", "subtipo_trabajador", "tipo_contrato",
+    "municipio_laboral", "alto_riesgo_pension", "eps", "arl", "fondo_pension",
+    "fondo_cesantias", "banco", "fecha_retiro",
+)
+
+
+def actualizar_empleado_dian(emp_id, empresa_id, **campos):
+    """Actualiza solo los campos DIAN de un empleado."""
+    _verificar_scope_empresa(empresa_id)
+    cols = {k: v for k, v in campos.items() if k in _EMP_DIAN_COLS}
+    if not cols:
+        return False, "Sin campos DIAN que actualizar."
+    sets = ", ".join(f"{k}=?" for k in cols)
+    conn = get_connection()
+    conn.execute(f"UPDATE empleados SET {sets} WHERE id=? AND empresa_id=?",
+                 (*cols.values(), emp_id, empresa_id))
+    conn.commit()
+    conn.close()
+    return True, "Datos DIAN actualizados."
+
+
+def validar_empleado_dian(emp):
+    """Devuelve lista de campos DIAN faltantes en el dict del empleado."""
+    faltantes = []
+    requeridos = [
+        ("primer_nombre",    "Primer nombre"),
+        ("primer_apellido",  "Primer apellido"),
+        ("tipo_documento",   "Tipo de documento"),
+        ("documento",        "Número de documento"),
+        ("tipo_trabajador",  "Tipo de trabajador"),
+        ("tipo_contrato",    "Tipo de contrato"),
+        ("municipio_laboral","Municipio de trabajo (Divipola)"),
+        ("eps",              "EPS"),
+        ("arl",              "ARL"),
+        ("fondo_pension",    "Fondo de pensiones"),
+        ("fondo_cesantias",  "Fondo de cesantías"),
+        ("banco",            "Banco"),
+        ("numero_cuenta",    "Número de cuenta"),
+        ("tipo_cuenta",      "Tipo de cuenta"),
+        ("fecha_ingreso",    "Fecha de ingreso"),
+    ]
+    for clave, etiqueta in requeridos:
+        if not emp.get(clave):
+            faltantes.append(etiqueta)
+    return faltantes
+
+
+# ─── Configuración DIAN por empresa ──────────────────────────────────────────
+
+def obtener_config_dian(empresa_id):
+    _verificar_scope_empresa(empresa_id)
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM config_dian WHERE empresa_id=?", (empresa_id,)).fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return {"empresa_id": empresa_id, "prefijo": "NE", "consecutivo": 0,
+            "ambiente": "habilitacion", "software_id": None, "software_pin": None}
+
+
+def guardar_config_dian(empresa_id, prefijo="NE", consecutivo=0,
+                        ambiente="habilitacion", software_id=None, software_pin=None):
+    _verificar_scope_empresa(empresa_id)
+    if ambiente not in ("habilitacion", "produccion"):
+        return False, "Ambiente inválido (habilitacion|produccion)."
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO config_dian (empresa_id, prefijo, consecutivo, ambiente,
+            software_id, software_pin)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(empresa_id) DO UPDATE SET
+            prefijo=excluded.prefijo, consecutivo=excluded.consecutivo,
+            ambiente=excluded.ambiente, software_id=excluded.software_id,
+            software_pin=excluded.software_pin
+    """, (empresa_id, prefijo or "NE", int(consecutivo or 0),
+          ambiente, software_id, software_pin))
+    conn.commit()
+    conn.close()
+    return True, "Configuración DIAN guardada."
+
+
+# ─── CUNE y generación del documento mensual ─────────────────────────────────
+
+def _fmt2(x):
+    return f"{D(x).quantize(_CENT, rounding=ROUND_HALF_UP):.2f}"
+
+
+def calcular_cune(numero, fec_ne, hor_ne, val_dev, val_ded,
+                  nit, doc_trabajador, software_pin, ambiente):
+    """CUNE = SHA-384 de la concatenación estricta definida en el Anexo
+    Técnico (NumNE+FecNE+HorNE+ValDev+ValDed+ValTol+NitNE+DocEmp+
+    TipoXML+SoftwarePIN+TipAmb)."""
+    tip_amb = "1" if ambiente == "produccion" else "2"
+    cadena = (str(numero) + fec_ne + hor_ne
+              + _fmt2(val_dev) + _fmt2(val_ded)
+              + _fmt2(D(val_dev) - D(val_ded))
+              + str(nit) + str(doc_trabajador) + "102"
+              + str(software_pin or "") + tip_amb)
+    return hashlib.sha384(cadena.encode("utf-8")).hexdigest()
+
+
+def calcular_software_security_code(software_id, software_pin, numero):
+    """SHA-384(SoftwareID + SoftwarePIN + Número del documento)."""
+    return hashlib.sha384(
+        f"{software_id or ''}{software_pin or ''}{numero}".encode("utf-8")
+    ).hexdigest()
+
+
+def _sub_el(parent, tag, val):
+    if val is None:
+        return None
+    el = ET.SubElement(parent, tag)
+    el.text = str(val)
+    return el
+
+
+def _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo, periodo,
+                   ambiente, cune, cfg, nota=None):
+    """Arma el XML NominaIndividual del anexo (un documento por trabajador
+    por mes, con los acumulados de todas las nóminas del período)."""
+    ahora = datetime.now()
+    fec = ahora.strftime("%Y-%m-%d")
+    hor = ahora.strftime("%H:%M:%S") + "-05:00"
+    y, m = int(periodo[:4]), int(periodo[5:7])
+    ultimo_dia = (datetime(y + (m == 12), (m % 12) + 1, 1) - timedelta(days=1)).day
+    periodo_nomina = "5" if empresa.get("periodo_pago") == "quincenal" else "4"
+
+    root = ET.Element("NominaIndividual",
+                      xmlns="dian:gov:co:facturaelectronica:NominaIndividual")
+
+    per = ET.SubElement(root, "Periodo")
+    _sub_el(per, "FechaIngreso", emp.get("fecha_ingreso"))
+    _sub_el(per, "FechaRetiro", emp.get("fecha_retiro"))
+    _sub_el(per, "FechaLiquidacionInicio", f"{periodo}-01")
+    _sub_el(per, "FechaLiquidacionFin", f"{periodo}-{ultimo_dia:02d}")
+    _sub_el(per, "TiempoLaborado", str(int(tot["dias"] or 0)))
+    _sub_el(per, "FechaGeneracion", ahora.strftime("%Y-%m-%dT%H:%M:%S"))
+
+    nseq = ET.SubElement(root, "NumeroSecuenciaXML")
+    _sub_el(nseq, "CodigoTrabajador", emp.get("documento"))
+    _sub_el(nseq, "Prefijo", prefijo)
+    _sub_el(nseq, "Consecutivo", str(consecutivo))
+    _sub_el(nseq, "Numero", numero)
+
+    lug = ET.SubElement(root, "LugarGeneracionXML")
+    _sub_el(lug, "Pais", empresa.get("pais") or "CO")
+    _sub_el(lug, "DepartamentoEstado", empresa.get("departamento"))
+    _sub_el(lug, "MunicipioCiudad", empresa.get("municipio"))
+    _sub_el(lug, "Direccion", empresa.get("direccion"))
+
+    gen = ET.SubElement(root, "InformacionGeneralXML")
+    _sub_el(gen, "FechaGeneracion", fec)
+    _sub_el(gen, "HoraGeneracion", hor)
+    _sub_el(gen, "PeriodoNomina", periodo_nomina)
+    _sub_el(gen, "TipoMoneda", "COP")
+    _sub_el(gen, "TipoXML", "102")
+    _sub_el(gen, "SoftwareSecurityCode",
+            calcular_software_security_code(
+                cfg.get("software_id"), cfg.get("software_pin"), numero))
+    _sub_el(gen, "CUNE", cune)
+    if nota:
+        _sub_el(gen, "Nota", nota)
+
+    emr = ET.SubElement(root, "EmpleadorXML")
+    _sub_el(emr, "RazonSocial", empresa.get("nombre"))
+    _sub_el(emr, "NIT", empresa.get("nit"))
+    _sub_el(emr, "Pais", empresa.get("pais") or "CO")
+    _sub_el(emr, "DepartamentoEstado", empresa.get("departamento"))
+    _sub_el(emr, "MunicipioCiudad", empresa.get("municipio"))
+    _sub_el(emr, "Direccion", empresa.get("direccion"))
+
+    tr = ET.SubElement(root, "TrabajadorXML")
+    _sub_el(tr, "TipoTrabajador", emp.get("tipo_trabajador") or "01")
+    _sub_el(tr, "SubTipoTrabajador", emp.get("subtipo_trabajador") or "00")
+    _sub_el(tr, "AltoRiesgoPension",
+            "true" if emp.get("alto_riesgo_pension") else "false")
+    _sub_el(tr, "TipoDocumento", emp.get("tipo_documento") or "13")
+    _sub_el(tr, "NumeroDocumento", emp.get("documento"))
+    _sub_el(tr, "PrimerApellido", emp.get("primer_apellido"))
+    _sub_el(tr, "SegundoApellido", emp.get("segundo_apellido"))
+    _sub_el(tr, "PrimerNombre", emp.get("primer_nombre"))
+    _sub_el(tr, "OtrosNombres", emp.get("otros_nombres"))
+    _sub_el(tr, "TipoContrato", emp.get("tipo_contrato") or "1")
+    _sub_el(tr, "Sueldo", _fmt2(emp.get("salario") or 0))
+    _sub_el(tr, "CodigoTrabajador", emp.get("documento"))
+
+    pago = ET.SubElement(root, "PagoXML")
+    _sub_el(pago, "Forma", "1")
+    _sub_el(pago, "Metodo", "10")
+    _sub_el(pago, "Banco", emp.get("banco"))
+    _sub_el(pago, "TipoCuenta", emp.get("tipo_cuenta"))
+    _sub_el(pago, "NumeroCuenta", emp.get("numero_cuenta"))
+
+    fps = ET.SubElement(root, "FechasPagos")
+    _sub_el(fps, "FechaPago", f"{periodo}-{ultimo_dia:02d}")
+
+    _sub_el(root, "NumeroDiasTrabajados", str(int(tot["dias"] or 0)))
+
+    dev = ET.SubElement(root, "DevengadosXML")
+    bas = ET.SubElement(dev, "Basico")
+    _sub_el(bas, "DiasTrabajados", str(int(tot["dias"] or 0)))
+    _sub_el(bas, "SueldoTrabajado", _fmt2(tot["basico"] or 0))
+    if D(tot["aux"] or 0) > 0:
+        tra = ET.SubElement(dev, "Transporte")
+        _sub_el(tra, "AuxilioTransporte", _fmt2(tot["aux"]))
+    if D(tot["he"] or 0) > 0:
+        hes = ET.SubElement(dev, "HorasExtras")
+        he_el = ET.SubElement(hes, "HorasExtra")
+        _sub_el(he_el, "Cantidad", _fmt2(tot["he"]))
+        _sub_el(he_el, "Porcentaje", "25.00")
+        _sub_el(he_el, "Pago", _fmt2(tot["pago_extras"]))
+    if D(tot["bon"] or 0) > 0:
+        bons = ET.SubElement(dev, "Bonificaciones")
+        _sub_el(bons, "BonificacionS", "0.00")
+        _sub_el(bons, "BonificacionNS", _fmt2(tot["bon"]))
+
+    ded = ET.SubElement(root, "DeduccionesXML")
+    sal_el = ET.SubElement(ded, "Salud")
+    _sub_el(sal_el, "Porcentaje", _fmt2(tot["pct_salud"]))
+    _sub_el(sal_el, "Deduccion", _fmt2(tot["salud"]))
+    pen_el = ET.SubElement(ded, "FondoPension")
+    _sub_el(pen_el, "Porcentaje", _fmt2(tot["pct_pension"]))
+    _sub_el(pen_el, "Deduccion", _fmt2(tot["pension"]))
+    fsp_el = ET.SubElement(ded, "FondoSP")
+    _sub_el(fsp_el, "Porcentaje", _fmt2(tot["pct_fsp"]))
+    _sub_el(fsp_el, "DeduccionSP", _fmt2(tot["fsp"]))
+    if D(tot["prest"] or 0) > 0:
+        lib = ET.SubElement(ded, "Libranzas")
+        _sub_el(lib, "Deduccion", _fmt2(tot["prest"]))
+        _sub_el(lib, "Descripcion", "Préstamo interno")
+    if D(tot["ded"] or 0) > 0:
+        od = ET.SubElement(ded, "OtrasDeducciones")
+        _sub_el(od, "OtraDeduccion", _fmt2(tot["ded"]))
+
+    _sub_el(root, "DevengadosTotal", _fmt2(tot["bruto"]))
+    _sub_el(root, "DeduccionesTotal", _fmt2(tot["deducciones_total"]))
+    _sub_el(root, "ComprobanteTotal", _fmt2(tot["neto"]))
+
+    xml_str = ET.tostring(root, encoding="unicode")
+    return xml.dom.minidom.parseString(xml_str).toprettyxml(indent="  ")
+
+
+def _dian_dir(empresa_id):
+    d = os.path.join(get_reports_dir(empresa_id), "dian")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _totales_periodo(conn, empresa_id, empleado_id, periodo):
+    row = conn.execute("""
+        SELECT SUM(dias_trabajados) dias, SUM(horas_extras) he,
+               SUM(horas_extras*valor_hora_extra) pago_extras,
+               SUM(bonificaciones) bon, SUM(deducciones) ded,
+               SUM(salud) salud, SUM(pension) pension, SUM(fsp) fsp,
+               SUM(prestamo) prest, SUM(auxilio_transporte) aux,
+               SUM(salario_bruto) bruto, SUM(salario_neto) neto,
+               COALESCE(SUM(ibc),0) ibc, MAX(salario_base) sb
+        FROM nominas
+        WHERE empresa_id=? AND empleado_id=? AND periodo=? AND quincena!=99
+    """, (empresa_id, empleado_id, periodo)).fetchone()
+    if not row or row["dias"] is None:
+        return None
+    t = dict(row)
+    # El básico devengado = bruto − aux − extras − bonificaciones
+    t["basico"] = (D(t["bruto"] or 0) - D(t["aux"] or 0)
+                   - D(t["pago_extras"] or 0) - D(t["bon"] or 0))
+    t["deducciones_total"] = (D(t["salud"] or 0) + D(t["pension"] or 0)
+                              + D(t["fsp"] or 0) + D(t["ded"] or 0)
+                              + D(t["prest"] or 0))
+    p = parametros_vigentes(periodo)
+    t["pct_salud"] = p["pct_salud"]; t["pct_pension"] = p["pct_pension"]
+    t["pct_fsp"] = p["pct_fsp"]
+    return t
+
+
+def generar_documento_dian(empresa_id, empleado_id, periodo, regenerar=False):
+    """Genera el Documento Soporte de Pago mensual de un empleado: agrega
+    todas las nóminas del período (quincenas incluidas), arma el XML,
+    calcula el CUNE y lo registra en documentos_dian."""
+    _verificar_scope_empresa(empresa_id)
+    conn = get_connection()
+    try:
+        cfg = obtener_config_dian(empresa_id)
+        empresa = conn.execute(
+            "SELECT * FROM empresas WHERE id=?", (empresa_id,)).fetchone()
+        emp = conn.execute(
+            "SELECT * FROM empleados WHERE id=? AND empresa_id=?",
+            (empleado_id, empresa_id)).fetchone()
+        if not empresa or not emp:
+            return False, "Empresa o empleado no encontrado.", None, []
+        emp = dict(emp); empresa = dict(empresa)
+
+        prev = conn.execute(
+            "SELECT id FROM documentos_dian WHERE empresa_id=? AND empleado_id=? "
+            "AND periodo=? AND tipo='nomina'",
+            (empresa_id, empleado_id, periodo)).fetchone()
+        if prev and not regenerar:
+            return False, f"Ya existe el documento del período {periodo} para este empleado.", prev["id"], []
+        if prev and regenerar:
+            conn.execute("DELETE FROM documentos_dian WHERE id=?", (prev["id"],))
+
+        tot = _totales_periodo(conn, empresa_id, empleado_id, periodo)
+        if not tot:
+            return False, f"El empleado no tiene nóminas en el período {periodo}.", None, []
+
+        faltantes = validar_empleado_dian(emp)
+        if not empresa.get("departamento") or not empresa.get("municipio"):
+            faltantes.append("Ubicación de la empresa (departamento/municipio)")
+
+        consecutivo = int(cfg.get("consecutivo") or 0) + 1
+        prefijo = cfg.get("prefijo") or "NE"
+        numero = f"{prefijo}{consecutivo}"
+        ambiente = cfg.get("ambiente") or "habilitacion"
+
+        ahora = datetime.now()
+        cune = calcular_cune(
+            numero, ahora.strftime("%Y-%m-%d"),
+            ahora.strftime("%H:%M:%S") + "-05:00",
+            tot["bruto"], tot["deducciones_total"],
+            empresa.get("nit"), emp.get("documento"),
+            cfg.get("software_pin"), ambiente)
+
+        xml = _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo,
+                             periodo, ambiente, cune, cfg)
+        xml_path = os.path.join(_dian_dir(empresa_id),
+                                f"{numero}_{emp.get('documento','doc')}.xml")
+        with open(xml_path, "w", encoding="utf-8") as f:
+            f.write(xml)
+
+        conn.execute("""
+            INSERT INTO documentos_dian (empresa_id, empleado_id, periodo, tipo,
+                prefijo, numero, cune, xml_path, ambiente, estado)
+            VALUES (?,?,?, 'nomina', ?,?,?,?,?, 'generado')
+        """, (empresa_id, empleado_id, periodo, prefijo, numero, cune,
+              xml_path, ambiente))
+        doc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "UPDATE config_dian SET consecutivo=?, actualizado_en=datetime('now') "
+            "WHERE empresa_id=?", (consecutivo, empresa_id))
+        conn.commit()
+
+        msg = f"Documento {numero} generado (CUNE: {cune[:16]}…)."
+        if faltantes:
+            msg += f" ⚠ Faltan datos DIAN: {', '.join(faltantes)}"
+        return True, msg, doc_id, faltantes
+    except Exception as e:
+        return False, str(e), None, []
+    finally:
+        conn.close()
+
+
+def generar_documentos_periodo(empresa_id, periodo, regenerar=False):
+    """Genera el documento mensual para TODOS los empleados con nómina en
+    el período. Devuelve (generados, omitidos, errores)."""
+    _verificar_scope_empresa(empresa_id)
+    conn = get_connection()
+    emps = conn.execute(
+        "SELECT DISTINCT empleado_id FROM nominas WHERE empresa_id=? AND periodo=?",
+        (empresa_id, periodo)).fetchall()
+    conn.close()
+    ok_n, skip, errs = 0, [], []
+    for r in emps:
+        ok, msg, _doc, _warn = generar_documento_dian(
+            empresa_id, r["empleado_id"], periodo, regenerar=regenerar)
+        if ok:
+            ok_n += 1
+        else:
+            (errs if "Ya existe" not in msg else skip).append(msg)
+    return ok_n, skip, errs
+
+
+def listar_documentos_dian(empresa_id, periodo=None):
+    _verificar_scope_empresa(empresa_id)
+    fil = ["d.empresa_id=?"]; params = [empresa_id]
+    if periodo:
+        fil.append("d.periodo=?"); params.append(periodo)
+    conn = get_connection()
+    rows = conn.execute(f"""
+        SELECT d.*, e.nombre as empleado_nombre, e.documento
+        FROM documentos_dian d JOIN empleados e ON d.empleado_id=e.id
+        WHERE {' AND '.join(fil)} ORDER BY d.id DESC
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def obtener_documento_dian(doc_id):
+    conn = get_connection()
+    _verificar_scope_registro(conn, "documentos_dian", doc_id)
+    row = conn.execute("""
+        SELECT d.*, e.nombre as empleado_nombre, e.documento
+        FROM documentos_dian d JOIN empleados e ON d.empleado_id=e.id
+        WHERE d.id=?
+    """, (doc_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def marcar_documento_dian(doc_id, estado, respuesta=None):
+    """Actualiza el estado de transmisión del documento (manual hasta que
+    exista integración con proveedor/DIAN)."""
+    conn = get_connection()
+    _verificar_scope_registro(conn, "documentos_dian", doc_id)
+    if estado not in ("generado", "transmitido", "aceptado", "rechazado"):
+        conn.close()
+        return False, "Estado inválido."
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    f_envio = ahora if estado == "transmitido" else None
+    f_resp = ahora if estado in ("aceptado", "rechazado") else None
+    conn.execute("""
+        UPDATE documentos_dian SET estado=?,
+            fecha_envio=COALESCE(?, fecha_envio),
+            fecha_respuesta=COALESCE(?, fecha_respuesta),
+            respuesta=COALESCE(?, respuesta)
+        WHERE id=?
+    """, (estado, f_envio, f_resp, respuesta, doc_id))
+    conn.commit()
+    conn.close()
+    return True, f"Documento marcado como '{estado}'."
+
+
+def generar_nota_ajuste(doc_id, motivo):
+    """Genera una Nota de Ajuste sobre un documento transmitido: referencia
+    el CUNE original y registra el nuevo documento tipo 'ajuste'."""
+    conn = get_connection()
+    _verificar_scope_registro(conn, "documentos_dian", doc_id)
+    try:
+        orig = conn.execute(
+            "SELECT * FROM documentos_dian WHERE id=?", (doc_id,)).fetchone()
+        if not orig or orig["tipo"] != "nomina":
+            return False, "Documento origen no encontrado.", None
+        if orig["estado"] == "generado":
+            return False, "El documento aún no se ha transmitido; "
+            "regenérelo en lugar de crear una nota de ajuste.", None
+        orig = dict(orig)
+        empresa_id, empleado_id, periodo = (
+            orig["empresa_id"], orig["empleado_id"], orig["periodo"])
+        cfg = obtener_config_dian(empresa_id)
+        empresa = dict(conn.execute(
+            "SELECT * FROM empresas WHERE id=?", (empresa_id,)).fetchone())
+        emp = dict(conn.execute(
+            "SELECT * FROM empleados WHERE id=?", (empleado_id,)).fetchone())
+        tot = _totales_periodo(conn, empresa_id, empleado_id, periodo)
+        if not tot:
+            return False, "No hay nóminas del período para ajustar.", None
+
+        consecutivo = int(cfg.get("consecutivo") or 0) + 1
+        prefijo = cfg.get("prefijo") or "NE"
+        numero = f"{prefijo}{consecutivo}"
+        ambiente = orig.get("ambiente") or cfg.get("ambiente")
+        ahora = datetime.now()
+        cune = calcular_cune(
+            numero, ahora.strftime("%Y-%m-%d"),
+            ahora.strftime("%H:%M:%S") + "-05:00",
+            tot["bruto"], tot["deducciones_total"],
+            empresa.get("nit"), emp.get("documento"),
+            cfg.get("software_pin"), ambiente)
+
+        xml = _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo,
+                             periodo, ambiente, cune, cfg,
+                             nota=f"Nota de ajuste sobre {orig['numero']} "
+                                  f"(CUNE {orig['cune'][:16]}…): {motivo}")
+        xml_path = os.path.join(
+            _dian_dir(empresa_id),
+            f"{numero}_ajuste_{emp.get('documento','doc')}.xml")
+        with open(xml_path, "w", encoding="utf-8") as f:
+            f.write(xml)
+
+        conn.execute("""
+            INSERT INTO documentos_dian (empresa_id, empleado_id, periodo, tipo,
+                prefijo, numero, cune, xml_path, ambiente, estado, doc_origen_id,
+                respuesta)
+            VALUES (?,?,?, 'ajuste', ?,?,?,?,?, 'generado', ?, ?)
+        """, (empresa_id, empleado_id, periodo, prefijo, numero, cune,
+              xml_path, ambiente, doc_id, motivo))
+        nuevo_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "UPDATE config_dian SET consecutivo=?, actualizado_en=datetime('now') "
+            "WHERE empresa_id=?", (consecutivo, empresa_id))
+        conn.commit()
+        return True, f"Nota de ajuste {numero} generada.", nuevo_id
+    except Exception as e:
+        return False, str(e), None
+    finally:
+        conn.close()
+
+
+def empleados_sin_datos_dian(empresa_id):
+    """Empleados activos con campos DIAN faltantes → [(nombre, [faltantes])]."""
+    _verificar_scope_empresa(empresa_id)
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM empleados WHERE empresa_id=? AND activo=1",
+        (empresa_id,)).fetchall()
+    conn.close()
+    res = []
+    for r in rows:
+        e = dict(r)
+        f = validar_empleado_dian(e)
+        if f:
+            res.append((e["nombre"], f))
+    return res
+
+
+def fecha_limite_dian(periodo):
+    """Fecha límite de transmisión: día 10 del mes siguiente al período."""
+    y, m = int(periodo[:4]), int(periodo[5:7])
+    if m == 12:
+        return datetime(y + 1, 1, 10)
+    return datetime(y, m + 1, 10)
+
+
+def dias_plazo_dian(periodo):
+    """Días restantes hasta la fecha límite de transmisión (negativo=vencido)."""
+    return (fecha_limite_dian(periodo).date() - datetime.now().date()).days
+
+
+def verificar_conectividad(url="https://vpfe.dian.gov.co", timeout=5):
+    """Comprueba conectividad básica con la DIAN (o URL del proveedor)."""
+    try:
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": "NominaApp"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, f"Conectado ({r.status}) — {url}"
+    except Exception as e:
+        # Algunos endpoints rechazan HEAD; un error HTTP sigue siendo conexión
+        if hasattr(e, "code"):
+            return True, f"Conectado (HTTP {e.code}) — {url}"
+        return False, f"Sin conexión a {url}: {e}"
 
 # ─── Dinero exacto ────────────────────────────────────────────────────────────
 # Toda la aritmética monetaria se hace en Decimal y se cuantiza a 2 decimales

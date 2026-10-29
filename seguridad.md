@@ -57,17 +57,21 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [ ] Retención en la fuente y prestaciones sociales (prima, cesantías, intereses) — pendiente
 - [ ] Novedades aún no descuentan días automáticamente del cálculo de nómina (son registro informativo — el cálculo del efecto en pago queda para la integración DIAN)
 
-## Fase 5 — DIAN (nómina electrónica)
+## Fase 5 — DIAN (nómina electrónica) ✅ (fundación — sin transmisión real)
 
-- [ ] Decidir: proveedor tecnológico vs integración directa (directa = XML UBL + firma digital + habilitación propia — mucho más trabajo)
-- [ ] Expandir `empleados`: nombres/apellidos separados, tipo documento (CC/CE/PPT), municipio (Divipola), EPS, ARL, fondo pensión, banco, tipo trabajador
-- [ ] Expandir `nominas`: `cune`, `estado_transmision`, `fecha_envio`, `fecha_respuesta`, `mensaje_error`, `xml_path`, `ambiente`
-- [ ] Generación de XML según Anexo Técnico + consecutivo autorizado
-- [ ] Notas de Ajuste (documento de corrección)
-- [ ] Check de conectividad + `requests` al proveedor/DIAN; credenciales en config externo, no en código
-- [ ] Toggle habilitación/producción + set de pruebas DIAN antes de producción
-- [ ] Alerta de plazo legal (transmitir dentro del plazo reglamentario del mes siguiente)
-- [ ] QR + CUNE en la colilla PDF (validación tipo factura electrónica)
+- [x] `empleados` expandido con campos DIAN: nombres/apellidos separados (con auto-split heurístico del nombre), `tipo_documento`, `tipo_trabajador`, `subtipo_trabajador`, `tipo_contrato`, `municipio_laboral` (Divipola), `alto_riesgo_pension`, EPS, ARL, fondo de pensiones, fondo de cesantías, banco, `fecha_retiro` — todos editables en el formulario de empleado (sección "Datos DIAN")
+- [x] `empresas` con `departamento`, `municipio` (Divipola) y `pais` — editables en el formulario de empresa
+- [x] `documentos_dian` (no `nominas`): 1 documento mensual por trabajador — agrega todas las nóminas del período (quincenas sumadas). Campos: `numero`/`prefijo`, `cune`, `xml_path`, `ambiente`, `estado` (generado→transmitido→aceptado/rechazado), `fecha_envio`, `fecha_respuesta`, `respuesta`, `doc_origen_id` (para notas de ajuste)
+- [x] Generación de XML `NominaIndividual` (estructura del Anexo Técnico Res. 000013 — **pendiente validar contra el set de pruebas de habilitación**): Periodo, NumeroSecuenciaXML, LugarGeneracionXML, InformacionGeneralXML (con `SoftwareSecurityCode` SHA-384 y CUNE), EmpleadorXML, TrabajadorXML, PagoXML, FechasPagos, DevengadosXML (Basico/Transporte/HorasExtras/Bonificaciones), DeduccionesXML (Salud/FondoPension/FondoSP/Libranzas/OtrasDeducciones) y totales — `database.py: generar_documento_dian`, `generar_documentos_periodo`
+- [x] **CUNE** = SHA-384 de concatenación estricta (NumNE+FecNE+HorNE+ValDev+ValDed+ValTol+NitNE+DocEmp+TipoXML+SoftwarePIN+TipAmb)
+- [x] `config_dian` por empresa: prefijo, consecutivo, ambiente (habilitación/producción), Software ID/PIN — nueva sección GUI "🏛️ DIAN" en AdminWin
+- [x] Notas de Ajuste: `generar_nota_ajuste` crea documento tipo 'ajuste' referenciando el CUNE/número del original transmitido
+- [x] Check de conectividad (`verificar_conectividad`, HEAD request con timeout) + validador `empleados_sin_datos_dian` que lista los campos faltantes por empleado
+- [x] Alerta de plazo en la sección DIAN: días restantes hasta el día 10 del mes siguiente (`fecha_limite_dian`/`dias_plazo_dian`)
+- [x] Backup/export actualizados: las nuevas tablas viajan en el backup de empresa (con remapeo de ids y de `doc_origen_id`); el borrado definitivo de empleado maneja la FK de `documentos_dian`
+- [ ] **Transmisión real**: proveedor tecnológico vs directo sigue como decisión pendiente — por ahora los estados se marcan manualmente (transmitido/aceptado/rechazado + respuesta); falta firma XMLDSig/XAdES-BES, `SendNominaSync`/`GetStatus` o API del proveedor, y credenciales en config externo
+- [ ] QR + CUNE en la representación gráfica PDF del documento mensual
+- [ ] XML de notas de ajuste con estructura `NominaIndividualDeAjuste` completa (hoy es el documento estándar + nota de referencia)
 
 ## Fase 6 — Auditoría y Habeas Data
 

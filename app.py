@@ -717,6 +717,10 @@ class SuperAdminWin(BaseWin):
         e_nit = fld("NIT *",      emp.get("nit","")      if emp else "")
         e_dir = fld("Dirección",  emp.get("direccion","") if emp else "")
         e_tel = fld("Teléfono",   emp.get("telefono","")  if emp else "")
+        e_dep = fld("Departamento (código DIAN, ej. 05=Antioquia)",
+                    emp.get("departamento","") if emp else "")
+        e_mun = fld("Municipio (código Divipola, ej. 05001=Medellín)",
+                    emp.get("municipio","") if emp else "")
 
         tk.Label(p, text="Período de pago *", font=F["sm"], bg=C["bg"], fg=C["sub"]).pack(padx=24,anchor="w",pady=(4,2))
         e_periodo = Cbo(p, values=["Mensual","Quincenal"], state="readonly", width=30)
@@ -747,10 +751,14 @@ class SuperAdminWin(BaseWin):
             try:
                 if nuevo:
                     ok,msg = db.crear_empresa(nom,nit,e_dir.val(),e_tel.val(),
-                                              logo_path,periodo_pago)
+                                              logo_path,periodo_pago,
+                                              departamento=e_dep.val() or None,
+                                              municipio=e_mun.val() or None)
                 else:
                     ok,msg = db.actualizar_empresa(emp["id"],nom,nit,e_dir.val(),e_tel.val(),
-                                                   logo_path,periodo_pago)
+                                                   logo_path,periodo_pago,
+                                                   departamento=e_dep.val() or None,
+                                                   municipio=e_mun.val() or None)
             except Exception as ex: le.config(text=f"Error: {ex}"); return
             if ok: messagebox.showinfo("✓ Éxito",msg,parent=win); win.destroy(); self._load_emp()
             else:  le.config(text=f"✗  {msg}")
@@ -1150,6 +1158,7 @@ class AdminWin(BaseWin):
              ("nomina",  "💰  Nómina",           self._s_nomina),
              ("colilla", "🧾  Colillas de Pago",  self._s_colilla),
              ("hist",    "📋  Historial Nómina",  self._s_hist),
+             ("dian",    "🏛️  DIAN",              self._s_dian),
              ("rep",     "📄  Reportes PDF",      self._s_rep),
              ("bitacora","📜  Bitácora",          self._s_bitacora),
              ("backup",  "💾  Backup",            self._s_backup)],
@@ -1479,6 +1488,51 @@ class AdminWin(BaseWin):
         e_edad       = fld("Edad",             str(e.get("edad","")) if e and e.get("edad") else "", solo_num=True)
         e_correo     = fld("Correo electrónico (opcional)", e.get("correo","") if e else "")
 
+        # ── Datos DIAN (nómina electrónica) ─────────────────────────────────
+        tk.Label(p, text="─── Datos DIAN (nómina electrónica) ───", font=F["h4"],
+            bg=C["bg"], fg=C["sub"]).pack(padx=24, anchor="w", pady=(10,6))
+        tk.Label(p, text="Requeridos para generar el documento mensual. "
+            "Si no los diligencias, el nombre se reparte automáticamente.",
+            font=F["sm"], bg=C["bg"], fg=C["muted"], wraplength=460,
+            justify="left").pack(padx=24, anchor="w", pady=(0,8))
+
+        def cbo_dian(label, mapping, actual):
+            tk.Label(p, text=label, font=F["sm"], bg=C["bg"], fg=C["sub"]
+                ).pack(padx=24, anchor="w", pady=(0,2))
+            keys = list(mapping.keys())
+            cb = Cbo(p, values=[f"{k} — {v}" for k, v in mapping.items()],
+                     state="readonly", width=44)
+            cb.pack(padx=24, fill="x", ipady=4, pady=(0,10))
+            cb.current(keys.index(actual) if actual in keys else 0)
+            return cb, keys
+
+        e_pnom  = fld("Primer nombre (DIAN)",   e.get("primer_nombre","")   if e else "")
+        e_onom  = fld("Otros nombres",          e.get("otros_nombres","")   if e else "")
+        e_pap   = fld("Primer apellido (DIAN)", e.get("primer_apellido","") if e else "")
+        e_sap   = fld("Segundo apellido",       e.get("segundo_apellido","") if e else "")
+        cb_tdoc, tdoc_keys = cbo_dian("Tipo de documento",
+            db.TIPOS_DOCUMENTO_DIAN, (e.get("tipo_documento") if e else "13") or "13")
+        cb_ttra, ttra_keys = cbo_dian("Tipo de trabajador",
+            db.TIPOS_TRABAJADOR_DIAN, (e.get("tipo_trabajador") if e else "01") or "01")
+        cb_stra, stra_keys = cbo_dian("Subtipo de trabajador",
+            db.SUBTIPOS_TRABAJADOR_DIAN, (e.get("subtipo_trabajador") if e else "00") or "00")
+        cb_tcon, tcon_keys = cbo_dian("Tipo de contrato",
+            db.TIPOS_CONTRATO_DIAN, (e.get("tipo_contrato") if e else "1") or "1")
+        e_mun   = fld("Municipio de trabajo (código Divipola, ej. 05001)",
+                      e.get("municipio_laboral","") if e else "")
+        e_eps   = fld("EPS",                e.get("eps","")             if e else "")
+        e_arl   = fld("ARL",                e.get("arl","")             if e else "")
+        e_fpen  = fld("Fondo de pensiones", e.get("fondo_pension","")   if e else "")
+        e_fces  = fld("Fondo de cesantías", e.get("fondo_cesantias","") if e else "")
+        e_banco = fld("Banco (código o nombre)", e.get("banco","")      if e else "")
+        e_fret  = fld("Fecha de retiro (YYYY-MM-DD, si aplica)",
+                      e.get("fecha_retiro","") if e else "")
+        arp_var = tk.IntVar(value=int(e.get("alto_riesgo_pension") or 0) if e else 0)
+        tk.Checkbutton(p, text="Alto riesgo de pensión (oficio de alto riesgo)",
+            variable=arp_var, font=F["bd"], bg=C["bg"], fg=C["txt"],
+            selectcolor=C["card"], activebackground=C["bg"],
+            activeforeground=C["txt"]).pack(padx=24, anchor="w", pady=(0,10))
+
         # ── Error ───────────────────────────────────────────────────────────
         le = tk.Label(p, text="", font=F["sm"], fg=C["err"], bg=C["bg"],
             wraplength=460, justify="left")
@@ -1538,13 +1592,43 @@ class AdminWin(BaseWin):
             if tipo_cuenta not in ["Ahorros","Corriente","Otro"]: tipo_cuenta = None
             correo_emp = e_correo.val().strip() or None
 
+            # Datos DIAN: si no se separan los nombres, se reparten del nombre
+            pnom = e_pnom.val(); onom = e_onom.val()
+            pap  = e_pap.val();  sap  = e_sap.val()
+            if not pnom and not pap:
+                toks = nom.split()
+                pnom = toks[0] if toks else ""
+                pap  = toks[-1] if len(toks) > 1 else ""
+                onom = " ".join(toks[1:-1]) if len(toks) > 2 else ""
+            fret = e_fret.val()
+            if fret:
+                try: datetime.strptime(fret, "%Y-%m-%d")
+                except: le.config(text="⚠  Fecha de retiro inválida."); return
+            dian = {
+                "primer_nombre": pnom or None, "otros_nombres": onom or None,
+                "primer_apellido": pap or None, "segundo_apellido": sap or None,
+                "tipo_documento": tdoc_keys[cb_tdoc.current()],
+                "tipo_trabajador": ttra_keys[cb_ttra.current()],
+                "subtipo_trabajador": stra_keys[cb_stra.current()],
+                "tipo_contrato": tcon_keys[cb_tcon.current()],
+                "municipio_laboral": e_mun.val() or None,
+                "eps": e_eps.val() or None, "arl": e_arl.val() or None,
+                "fondo_pension": e_fpen.val() or None,
+                "fondo_cesantias": e_fces.val() or None,
+                "banco": e_banco.val() or None,
+                "fecha_retiro": fret or None,
+                "alto_riesgo_pension": int(arp_var.get()),
+            }
+
             try:
                 if nuevo:
                     ok, msg = db.crear_empleado(self.eid, nom, doc, car, sal, ing,
-                        tipo_cuenta, num_cuenta, edad, vinc, tarifa_diaria, correo_emp)
+                        tipo_cuenta, num_cuenta, edad, vinc, tarifa_diaria, correo_emp,
+                        dian=dian)
                 else:
                     ok, msg = db.actualizar_empleado(e["id"], self.eid, nom, doc, car, sal, ing,
-                        tipo_cuenta, num_cuenta, edad, vinc, tarifa_diaria, correo_emp)
+                        tipo_cuenta, num_cuenta, edad, vinc, tarifa_diaria, correo_emp,
+                        dian=dian)
             except Exception as ex: le.config(text=f"Error: {ex}"); return
 
             if ok:
@@ -2065,6 +2149,173 @@ class AdminWin(BaseWin):
         if not messagebox.askyesno("Confirmar eliminación",
             "¿Eliminar esta novedad?\n⚠ Esta acción no se puede deshacer.",parent=self): return
         try: db.eliminar_novedad(nid); self._load_novedades()
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    # ═══ DIAN — NÓMINA ELECTRÓNICA ═══════════════════════════════════════════
+    def _s_dian(self):
+        self._clr()
+        self._hdr("🏛️  Nómina Electrónica — DIAN")
+        self._sub("Documento Soporte de Pago mensual por trabajador (Res. 000013/2021). "
+                  "Se acumulan todas las nóminas del mes — quincenas incluidas — en un "
+                  "solo XML. Transmisión obligatoria dentro de los primeros 10 días "
+                  "del mes siguiente.")
+
+        # Config + plazo
+        info = tk.Frame(self.ct, bg=C["card"]); info.pack(padx=24, fill="x", pady=(4,10))
+        try:
+            cfg = db.obtener_config_dian(self.eid)
+            ult_per = (db.listar_periodos(self.eid) or [db.obtener_periodo_actual()])[0]
+            d_rest = db.dias_plazo_dian(ult_per)
+            plazo_txt = (f"⏰ Plazo {ult_per}: {d_rest} día(s) para el 10 del mes siguiente"
+                         if d_rest >= 0 else f"⚠ Plazo {ult_per} VENCIDO hace {-d_rest} día(s)")
+            plazo_col = C["ok"] if d_rest > 5 else (C["accent"] if d_rest >= 0 else C["err"])
+        except Exception as ex:
+            cfg = {}; ult_per = "—"; plazo_txt = str(ex); plazo_col = C["err"]
+        tk.Label(info, text=f"Prefijo: {cfg.get('prefijo','NE')}   |   "
+            f"Próximo consecutivo: {int(cfg.get('consecutivo') or 0)+1}   |   "
+            f"Ambiente: {cfg.get('ambiente','habilitacion').upper()}   |   "
+            f"Último período: {ult_per}", font=F["bd"], bg=C["card"], fg=C["txt"]
+            ).pack(padx=14, pady=(10,2), anchor="w")
+        tk.Label(info, text=plazo_txt, font=F["bd"], bg=C["card"], fg=plazo_col
+            ).pack(padx=14, pady=(0,10), anchor="w")
+
+        # Acciones de configuración
+        fr = tk.Frame(self.ct, bg=C["bg"]); fr.pack(padx=24, anchor="w", pady=(0,8))
+        Btn(fr,"Configuración",cmd=self._form_config_dian,sty="out",icon="⚙").pack(side="left",padx=(0,8))
+        Btn(fr,"Verificar conectividad",cmd=self._dian_conectividad,sty="out",icon="🌐").pack(side="left",padx=(0,8))
+        Btn(fr,"Validar datos empleados",cmd=self._dian_validar,sty="out",icon="🔍").pack(side="left",padx=(0,8))
+
+        # Generación por período
+        genf = tk.Frame(self.ct, bg=C["bg"]); genf.pack(padx=24, anchor="w", pady=(0,10))
+        tk.Label(genf,text="Período (YYYY-MM):",font=F["sm"],bg=C["bg"],fg=C["sub"]).pack(side="left",padx=(0,4))
+        self.dian_per = Inp(genf,width=10); self.dian_per.pack(side="left",ipady=5,padx=(0,8))
+        self.dian_per.insert(0, ult_per if ult_per != "—" else db.obtener_periodo_actual())
+        Btn(genf,"Generar documentos del período",cmd=self._dian_generar,sty="ok",icon="📄").pack(side="left",padx=(0,8))
+
+        self.tv_dian = self._tree(
+            ("id","numero","empleado","periodo","tipo","cune","ambiente","estado","envio"),
+            [("ID",35),("Número",90),("Empleado",170),("Período",80),("Tipo",70),
+             ("CUNE",130),("Ambiente",90),("Estado",90),("Envío",140)])
+        fr2 = tk.Frame(self.ct,bg=C["bg"]); fr2.pack(padx=24,anchor="w",pady=(4,18))
+        Btn(fr2,"Marcar transmitido",cmd=lambda:self._dian_marcar("transmitido"),sty="out",icon="📤").pack(side="left",padx=(0,8))
+        Btn(fr2,"Marcar aceptado",cmd=lambda:self._dian_marcar("aceptado"),sty="ok",icon="✅").pack(side="left",padx=(0,8))
+        Btn(fr2,"Marcar rechazado",cmd=lambda:self._dian_marcar("rechazado"),sty="err",icon="⛔").pack(side="left",padx=(0,8))
+        Btn(fr2,"Nota de ajuste",cmd=self._dian_nota_ajuste,sty="out",icon="📝").pack(side="left",padx=(0,8))
+        Btn(fr2,"Abrir carpeta XML",cmd=self._dian_abrir_xml,sty="gh",icon="📂").pack(side="left",padx=(0,8))
+        self._load_dian()
+
+    def _load_dian(self):
+        self.tv_dian.delete(*self.tv_dian.get_children())
+        try:
+            for i,d in enumerate(db.listar_documentos_dian(self.eid)):
+                self.tv_dian.insert("","end",iid=str(d["id"]),
+                    values=(d["id"],d.get("numero",""),d.get("empleado_nombre",""),
+                            d["periodo"],d["tipo"],
+                            (d.get("cune") or "")[:18]+"…" if d.get("cune") else "—",
+                            d.get("ambiente",""),d.get("estado",""),
+                            d.get("fecha_envio") or "—"),
+                    tags=self._tag(i))
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _form_config_dian(self):
+        try: cfg = db.obtener_config_dian(self.eid)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self); return
+        win = self._win("Configuración DIAN","500x560")
+        tk.Label(win, text="⚙  Configuración DIAN", font=F["h3"],
+            bg=C["bg"],fg=C["txt"]).pack(pady=(20,2),padx=24,anchor="w")
+        tk.Label(win, text="El PIN y el Software ID se registran ante la DIAN "
+            "(o los entrega tu proveedor tecnológico).",
+            font=F["sm"],bg=C["bg"],fg=C["sub"],wraplength=450,justify="left"
+            ).pack(padx=24,anchor="w",pady=(0,14))
+        e_pre=self._field(win,"Prefijo de numeración *",val=cfg.get("prefijo","NE"))
+        e_con=self._field(win,"Consecutivo actual *",val=str(int(cfg.get("consecutivo") or 0)))
+        e_sid=self._field(win,"Software ID",val=cfg.get("software_id") or "")
+        e_pin=self._field(win,"Software PIN",val=cfg.get("software_pin") or "")
+        tk.Label(win,text="Ambiente *",font=F["sm"],bg=C["bg"],fg=C["sub"]).pack(padx=24,anchor="w")
+        cb_amb=Cbo(win,values=["habilitacion","produccion"],state="readonly",width=30)
+        cb_amb.pack(padx=24,fill="x",ipady=4,pady=(2,10))
+        cb_amb.set(cfg.get("ambiente","habilitacion"))
+        tk.Label(win,text="⚠ Usa 'habilitacion' hasta pasar el set de pruebas DIAN.",
+            font=F["sm"],bg=C["bg"],fg=C["accent"],wraplength=450).pack(padx=24,anchor="w")
+        le=self._err_lbl(win)
+        def save():
+            try: cons=int(e_con.get().strip() or "0")
+            except: le.config(text="⚠  Consecutivo inválido."); return
+            try:
+                ok,msg=db.guardar_config_dian(self.eid,e_pre.get().strip() or "NE",
+                    cons,cb_amb.get(),e_sid.get().strip() or None,
+                    e_pin.get().strip() or None)
+            except Exception as ex: le.config(text=f"Error: {ex}"); return
+            if ok: messagebox.showinfo("✓ Éxito",msg,parent=win); win.destroy(); self._s_dian()
+            else:  le.config(text=f"✗  {msg}")
+        self._btns(win,save,"Guardar configuración")
+
+    def _dian_conectividad(self):
+        ok,msg=db.verificar_conectividad()
+        (messagebox.showinfo if ok else messagebox.showwarning)(
+            "Conectividad DIAN",msg,parent=self)
+
+    def _dian_validar(self):
+        try: falt = db.empleados_sin_datos_dian(self.eid)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self); return
+        if not falt:
+            messagebox.showinfo("✓ Datos completos",
+                "Todos los empleados activos tienen los campos DIAN requeridos.",
+                parent=self); return
+        detalle="\n\n".join(f"• {n}:\n    {', '.join(f)}" for n,f in falt)
+        messagebox.showwarning("Datos DIAN faltantes",
+            f"{len(falt)} empleado(s) con campos faltantes:\n\n{detalle}",parent=self)
+
+    def _dian_generar(self):
+        per=self.dian_per.get().strip()
+        if not re.match(r"^\d{4}-\d{2}$",per):
+            messagebox.showerror("Error","Período inválido (YYYY-MM).",parent=self); return
+        try:
+            n,skips,errs=db.generar_documentos_periodo(self.eid,per)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self); return
+        msg=f"Se generaron {n} documento(s) del período {per}."
+        if skips: msg+=f"\n{len(skips)} omitido(s) (ya existían)."
+        if errs:  msg+="\n\nErrores:\n"+"\n".join(errs[:6])
+        messagebox.showinfo("Generación DIAN",msg,parent=self)
+        self._load_dian()
+
+    def _dian_marcar(self, estado):
+        did=self._sel(self.tv_dian,"documento")
+        if did is None: return
+        resp=None
+        if estado in ("aceptado","rechazado"):
+            from tkinter import simpledialog
+            resp=simpledialog.askstring("Respuesta DIAN",
+                "Respuesta/mensaje de la DIAN (opcional):",parent=self)
+            if resp is None: return
+        try:
+            ok,msg=db.marcar_documento_dian(did,estado,resp)
+            if ok: self._load_dian()
+            else: messagebox.showerror("Error",msg,parent=self)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _dian_nota_ajuste(self):
+        did=self._sel(self.tv_dian,"documento")
+        if did is None: return
+        from tkinter import simpledialog
+        motivo=simpledialog.askstring("Nota de Ajuste",
+            "Motivo del ajuste (corrección de valores, fechas, etc.):",parent=self)
+        if not motivo: return
+        try:
+            ok,msg,_id=db.generar_nota_ajuste(did,motivo)
+            if ok: messagebox.showinfo("✓ Éxito",msg,parent=self); self._load_dian()
+            else: messagebox.showerror("Error",msg,parent=self)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _dian_abrir_xml(self):
+        did=self._sel(self.tv_dian,"documento")
+        try:
+            d=db._dian_dir(self.eid)
+            if did is not None:
+                doc=db.obtener_documento_dian(did)
+                if doc and doc.get("xml_path") and os.path.exists(doc["xml_path"]):
+                    os.startfile(doc["xml_path"]); return
+            os.startfile(d)
         except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
 
     # ═══ CONTRATOS ════════════════════════════════════════════════════════════

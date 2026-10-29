@@ -8,14 +8,14 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 
 ---
 
-## Fase 0 — Higiene base
+## Fase 0 — Higiene base  ✅ COMPLETADA (2026-10-29)
 
-- [ ] `.gitignore`: excluir `nomina.db`, `reports/`, `logos/`, `fotos/`, `dist/`, `build/`
-- [ ] Mutex de instancia única — impide dos `app.exe` simultáneos (corrupción SQLite)
-- [ ] `report_callback_exception` + `sys.excepthook` → log a archivo rotativo + `messagebox` amigable
-- [ ] Backup automático de `nomina.db` al arrancar + `PRAGMA integrity_check` antes de migrar
-- [ ] Tabla `meta` con versión de app y de esquema (migraciones seguras)
-- [ ] Decisión documentada: datos junto al .exe (modo portable). Riesgo conocido: si el exe se mueve a `Program Files`, requiere permisos de admin.
+- [x] `.gitignore`: excluir `nomina.db`, `reports/`, `logos/`, `fotos/`, `dist/`, `build/`
+- [x] Mutex de instancia única — impide dos `app.exe` simultáneos (corrupción SQLite)
+- [x] `report_callback_exception` + `sys.excepthook` → log a archivo rotativo + `messagebox` amigable
+- [x] Backup automático de `nomina.db` al arrancar + `PRAGMA integrity_check` antes de migrar
+- [x] Tabla `meta` con versión de app y de esquema (migraciones seguras)
+- [x] Decisión documentada: datos junto al .exe (modo portable). Riesgo conocido: si el exe se mueve a `Program Files`, requiere permisos de admin.
 
 ## Fase 1 — Autenticación
 

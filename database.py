@@ -89,6 +89,65 @@ def get_connection():
     return conn
 
 
+# ─── Sesión y autorización (Fase 3) ───────────────────────────────────────────
+# La GUI establece la sesión tras el login. Las funciones de datos validan
+# rol y scope de empresa AQUÍ — no dependen solo de ocultar botones.
+_SESION = {"usuario_id": None, "rol": None, "empresa_id": None}
+
+
+def establecer_sesion(user: dict):
+    """Registra el usuario autenticado para el control de acceso."""
+    _SESION.update(usuario_id=user.get("id"), rol=user.get("rol"),
+                   empresa_id=user.get("empresa_id"))
+
+
+def cerrar_sesion():
+    _SESION.update(usuario_id=None, rol=None, empresa_id=None)
+
+
+def sesion_actual():
+    return dict(_SESION)
+
+
+def _requerir_rol(*roles):
+    if _SESION["rol"] not in roles:
+        raise PermissionError(
+            f"Esta acción requiere rol: {'/'.join(roles)}.")
+
+
+def _verificar_scope_empresa(empresa_id):
+    """El admin solo puede operar sobre su propia empresa; el superadmin
+    sobre cualquiera. Anti-IDOR a nivel de datos."""
+    _requerir_rol("admin", "superadmin")
+    if _SESION["rol"] != "superadmin" and \
+            int(empresa_id) != int(_SESION["empresa_id"] or -1):
+        raise PermissionError(
+            "No tienes permiso para operar sobre esta empresa.")
+
+
+def _verificar_cuenta_propia(usuario_id):
+    _requerir_rol("admin", "superadmin")
+    if int(usuario_id) != int(_SESION["usuario_id"] or -1):
+        raise PermissionError(
+            "Solo puedes realizar esta acción sobre tu propia cuenta.")
+
+
+def _empresa_de(conn, tabla, fila_id):
+    """Resuelve el empresa_id de un registro para verificar scope cuando
+    la función solo recibe el ID del registro."""
+    row = conn.execute(f"SELECT empresa_id FROM {tabla} WHERE id=?",
+                       (fila_id,)).fetchone()
+    return row["empresa_id"] if row else None
+
+
+def _verificar_scope_registro(conn, tabla, fila_id):
+    """Scope para funciones que reciben solo el ID del registro.
+    Si el registro no existe, se deja que la función lo maneje."""
+    eid = _empresa_de(conn, tabla, fila_id)
+    if eid is not None:
+        _verificar_scope_empresa(eid)
+
+
 def verificar_integridad():
     """Verifica la BD existente con PRAGMA integrity_check.
 
@@ -507,6 +566,7 @@ def migrar_base_datos():
 
 def crear_empresa(nombre, nit, direccion, telefono, logo_path=None, periodo_pago='mensual',
                   correo=None, correo_password=None):
+    _requerir_rol("superadmin")
     if correo_password:
         correo_password = cifrar_secreto(correo_password)
     conn = get_connection()
@@ -525,6 +585,7 @@ def crear_empresa(nombre, nit, direccion, telefono, logo_path=None, periodo_pago
 
 
 def listar_empresas():
+    _requerir_rol("superadmin")
     conn = get_connection()
     rows = conn.execute("SELECT * FROM empresas ORDER BY nombre").fetchall()
     conn.close()
@@ -532,6 +593,7 @@ def listar_empresas():
 
 
 def obtener_empresa(empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute("SELECT * FROM empresas WHERE id=?", (empresa_id,)).fetchone()
     conn.close()
@@ -540,6 +602,7 @@ def obtener_empresa(empresa_id):
 
 def actualizar_empresa(empresa_id, nombre, nit, direccion, telefono, logo_path=None,
                        periodo_pago='mensual', correo=None, correo_password=None):
+    _requerir_rol("superadmin")
     if correo_password:
         correo_password = cifrar_secreto(correo_password)
     conn = get_connection()
@@ -559,6 +622,7 @@ def actualizar_empresa(empresa_id, nombre, nit, direccion, telefono, logo_path=N
 
 
 def eliminar_empresa(empresa_id):
+    _requerir_rol("superadmin")
     conn = get_connection()
     conn.execute("DELETE FROM empresas WHERE id=?", (empresa_id,))
     conn.commit()
@@ -569,6 +633,7 @@ def eliminar_empresa(empresa_id):
 # ─── USUARIOS ────────────────────────────────────────────────────────────────
 
 def crear_admin(username, password, nombre, empresa_id, foto_path=None):
+    _requerir_rol("superadmin")
     ok_p, msg_p = politica_password_ok(password)
     if not ok_p:
         return False, msg_p
@@ -587,6 +652,7 @@ def crear_admin(username, password, nombre, empresa_id, foto_path=None):
 
 
 def listar_admins():
+    _requerir_rol("superadmin")
     conn = get_connection()
     rows = conn.execute("""
         SELECT u.*, e.nombre as empresa_nombre
@@ -600,6 +666,7 @@ def listar_admins():
 
 
 def eliminar_usuario(usuario_id):
+    _requerir_rol("superadmin")
     conn = get_connection()
     conn.execute("DELETE FROM usuarios WHERE id=? AND rol='admin'", (usuario_id,))
     conn.commit()
@@ -610,6 +677,7 @@ def eliminar_usuario(usuario_id):
 def cambiar_password(usuario_id, nueva_password):
     """Cambio por un tercero (superadmin resetea admin): obliga a que el
     usuario la cambie en su próximo login."""
+    _requerir_rol("superadmin")
     ok_p, msg_p = politica_password_ok(nueva_password)
     if not ok_p:
         return False, msg_p
@@ -623,6 +691,7 @@ def cambiar_password(usuario_id, nueva_password):
 
 
 def cambiar_password_propio(usuario_id, password_actual, nueva_password):
+    _verificar_cuenta_propia(usuario_id)
     ok_p, msg_p = politica_password_ok(nueva_password)
     if not ok_p:
         return False, msg_p
@@ -643,6 +712,7 @@ def cambiar_password_propio(usuario_id, password_actual, nueva_password):
 def verificar_password_usuario(usuario_id, password) -> bool:
     """Re-autenticación puntual (operaciones destructivas). No afecta
     contadores de bloqueo ni hace rehash."""
+    _verificar_cuenta_propia(usuario_id)
     conn = get_connection()
     row = conn.execute("SELECT password FROM usuarios WHERE id=?",
                        (usuario_id,)).fetchone()
@@ -651,6 +721,7 @@ def verificar_password_usuario(usuario_id, password) -> bool:
 
 
 def toggle_activo(usuario_id):
+    _requerir_rol("superadmin")
     conn = get_connection()
     row = conn.execute("SELECT activo FROM usuarios WHERE id=? AND rol='admin'", (usuario_id,)).fetchone()
     if not row:
@@ -665,6 +736,9 @@ def toggle_activo(usuario_id):
 
 
 def obtener_usuario(usuario_id):
+    _requerir_rol("admin", "superadmin")
+    if _SESION["rol"] != "superadmin":
+        _verificar_cuenta_propia(usuario_id)
     conn = get_connection()
     row = conn.execute("""
         SELECT u.*, e.nombre as empresa_nombre
@@ -775,6 +849,7 @@ def autenticar(username, password):
 def crear_empleado(empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
                    tipo_cuenta=None, numero_cuenta=None, edad=None,
                    tipo_vinculacion='salario', tarifa_diaria=None, correo=None):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         conn.execute(
@@ -794,6 +869,7 @@ def crear_empleado(empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
 
 
 def obtener_empleado(empleado_id, empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute(
         "SELECT * FROM empleados WHERE id=? AND empresa_id=?", (empleado_id, empresa_id)
@@ -805,6 +881,7 @@ def obtener_empleado(empleado_id, empresa_id):
 def actualizar_empleado(emp_id, empresa_id, nombre, documento, cargo, salario, fecha_ingreso,
                         tipo_cuenta=None, numero_cuenta=None, edad=None,
                         tipo_vinculacion='salario', tarifa_diaria=None, correo=None):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         conn.execute(
@@ -826,6 +903,7 @@ def actualizar_empleado(emp_id, empresa_id, nombre, documento, cargo, salario, f
 
 def eliminar_empleado(emp_id, empresa_id):
     """Inactiva un empleado (cambia activo=0)."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     conn.execute("UPDATE empleados SET activo=0 WHERE id=? AND empresa_id=?", (emp_id, empresa_id))
     conn.commit()
@@ -835,6 +913,7 @@ def eliminar_empleado(emp_id, empresa_id):
 
 def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False):
     """Elimina completamente un empleado y opcionalmente sus registros de nómina."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         # Verificar si existen nóminas asociadas
@@ -871,6 +950,7 @@ def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False):
 
 
 def toggle_activo_empleado(emp_id, empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute("SELECT activo FROM empleados WHERE id=? AND empresa_id=?", (emp_id, empresa_id)).fetchone()
     if not row:
@@ -886,6 +966,7 @@ def toggle_activo_empleado(emp_id, empresa_id):
 
 def cambiar_estado_empleado(emp_id, empresa_id, activo):
     """Establece el estado activo/inactivo de un empleado."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     cur = conn.execute(
         "UPDATE empleados SET activo=? WHERE id=? AND empresa_id=?",
@@ -902,6 +983,7 @@ def cambiar_estado_empleado(emp_id, empresa_id, activo):
 def guardar_nomina(empresa_id, empleado_id, periodo, dias_trabajados, horas_extras,
                    valor_hora_extra, bonificaciones, deducciones, observaciones, salario_base,
                    quincena=0, prestamo=0, periodo_pago='mensual'):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         # Verificar si ya existe nómina para este empleado en este período/quincena
@@ -947,6 +1029,7 @@ def guardar_nomina(empresa_id, empleado_id, periodo, dias_trabajados, horas_extr
 
 def obtener_nomina_existente(empresa_id, empleado_id, periodo, quincena=0):
     """Retorna la nómina existente de un empleado en un período, o None."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute("""
         SELECT n.*, e.nombre as empleado_nombre, e.cargo, e.documento, e.fecha_ingreso,
@@ -963,6 +1046,7 @@ def obtener_nomina_existente(empresa_id, empleado_id, periodo, quincena=0):
 
 
 def obtener_nomina(nomina_id, empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute("""
         SELECT n.*, e.nombre as empleado_nombre, e.cargo, e.documento, e.fecha_ingreso,
@@ -979,6 +1063,7 @@ def obtener_nomina(nomina_id, empresa_id):
 
 
 def listar_periodos(empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     rows = conn.execute(
         "SELECT DISTINCT periodo FROM nominas WHERE empresa_id=? ORDER BY periodo DESC",
@@ -989,6 +1074,7 @@ def listar_periodos(empresa_id):
 
 
 def estadisticas_empresa(empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     stats = {}
     stats["total_empleados"] = conn.execute(
@@ -1010,6 +1096,7 @@ def estadisticas_empresa(empresa_id):
 
 def actualizar_admin(usuario_id, username, nombre, empresa_id, foto_path=None):
     """Edita datos de un administrador (sin tocar contraseña)."""
+    _requerir_rol("superadmin")
     conn = get_connection()
     try:
         conn.execute(
@@ -1026,6 +1113,7 @@ def actualizar_admin(usuario_id, username, nombre, empresa_id, foto_path=None):
 
 def listar_empleados(empresa_id, incluir_inactivos=False):
     """Lista empleados activos o todos (activos + inactivos)."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     filtro = "" if incluir_inactivos else "AND activo=1"
     rows = conn.execute(
@@ -1038,6 +1126,7 @@ def listar_empleados(empresa_id, incluir_inactivos=False):
 
 def listar_empleados_por_tipo(empresa_id, tipo_vinculacion=None, incluir_inactivos=False):
     """Lista empleados filtrando por tipo de vinculación: 'salario', 'contrato' o None (todos)."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     filtros = ["empresa_id=?"]
     params = [empresa_id]
@@ -1075,6 +1164,7 @@ def guardar_nomina_prestacion(empresa_id, empleado_id, periodo, tarifa_diaria,
                                prestamo=0, observaciones=None):
     """Guarda el pago de un empleado de prestación de servicios (quincena=98).
     No aplica deducciones de ley — solo descuenta préstamos activos si hay."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         existente = conn.execute(
@@ -1113,6 +1203,7 @@ def guardar_nomina_prestacion(empresa_id, empleado_id, periodo, tarifa_diaria,
 def guardar_nomina_contrato(empresa_id, empleado_id, periodo, valor_total,
                              deducciones, observaciones):
     """Guarda la liquidación final de un contrato como nómina especial (quincena=99)."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         existente = conn.execute(
@@ -1145,6 +1236,7 @@ def guardar_nomina_contrato(empresa_id, empleado_id, periodo, valor_total,
 
 def obtener_reporte_empleados(empresa_id, incluir_inactivos=False):
     """Obtiene información completa de empleados para reporte."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     filtro = "" if incluir_inactivos else "AND e.activo=1"
     rows = conn.execute(
@@ -1164,6 +1256,7 @@ def obtener_reporte_empleados(empresa_id, incluir_inactivos=False):
 def listar_nominas(empresa_id, periodo=None, empleado_id=None):
     """Lista nóminas con filtros opcionales de período y empleado.
     Ordena por generado_en DESC para mostrar los más recientes primero."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     filtros = ["n.empresa_id=?"]
     params  = [empresa_id]
@@ -1187,6 +1280,7 @@ def listar_nominas(empresa_id, periodo=None, empleado_id=None):
 def limpiar_nominas_duplicadas(empresa_id):
     """Elimina nóminas duplicadas dejando solo la más reciente por empleado+período+quincena.
     Retorna cuántos duplicados eliminó."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         # Encontrar grupos duplicados: mismo empleado, período y quincena
@@ -1217,6 +1311,7 @@ def limpiar_nominas_duplicadas(empresa_id):
 
 def eliminar_nomina(nomina_id, empresa_id):
     """Elimina un registro de nómina definitivamente."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     conn.execute("DELETE FROM nominas WHERE id=? AND empresa_id=?", (nomina_id, empresa_id))
     conn.commit()
@@ -1233,6 +1328,7 @@ def obtener_periodo_actual():
 
 def obtener_periodos_disponibles(empresa_id):
     """Obtiene todos los períodos disponibles para una empresa, ordenados cronológicamente."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     rows = conn.execute(
         "SELECT DISTINCT periodo FROM nominas WHERE empresa_id=? ORDER BY periodo DESC",
@@ -1244,6 +1340,7 @@ def obtener_periodos_disponibles(empresa_id):
 
 def verificar_nuevo_periodo(empresa_id):
     """Verifica si el período actual tiene nóminas registradas."""
+    _verificar_scope_empresa(empresa_id)
     periodo_actual = obtener_periodo_actual()
     conn = get_connection()
     count = conn.execute(
@@ -1256,6 +1353,7 @@ def verificar_nuevo_periodo(empresa_id):
 
 def obtener_ultimo_periodo_registrado(empresa_id):
     """Obtiene el último período registrado en la base de datos."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute(
         "SELECT MAX(periodo) as ultimo FROM nominas WHERE empresa_id=?",
@@ -1309,7 +1407,11 @@ def guardar_imagen(file_path, carpeta_tipo, empresa_id=None, usuario_id=None):
     import shutil
     from datetime import datetime
     from paths import APP_DIR
-    
+
+    if empresa_id is not None:
+        _verificar_scope_empresa(empresa_id)
+    else:
+        _requerir_rol("admin", "superadmin")
     if not file_path or not os.path.exists(file_path):
         return None
     
@@ -1375,6 +1477,10 @@ def registrar_bitacora(usuario_id, usuario_nom, accion, detalle="", empresa_id=N
 
 def listar_bitacora(limite=200, empresa_id=None):
     """Lista los últimos registros de la bitácora. Si empresa_id es None, trae todos (superadmin)."""
+    if empresa_id is None:
+        _requerir_rol("superadmin")
+    else:
+        _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     if empresa_id is not None:
         rows = conn.execute(
@@ -1392,6 +1498,7 @@ def listar_bitacora(limite=200, empresa_id=None):
 
 def exportar_backup(ruta_destino):
     """Copia la base de datos completa a la ruta indicada (superadmin)."""
+    _requerir_rol("superadmin")
     import shutil
     try:
         shutil.copy2(DB_PATH, ruta_destino)
@@ -1402,6 +1509,7 @@ def exportar_backup(ruta_destino):
 
 def exportar_backup_empresa(empresa_id, ruta_destino):
     """Exporta solo los datos de una empresa a un archivo .db separado."""
+    _verificar_scope_empresa(empresa_id)
     try:
         conn_src = get_connection()
         import sqlite3 as _sql
@@ -1516,6 +1624,7 @@ def exportar_backup_empresa(empresa_id, ruta_destino):
 
 def importar_backup(ruta_origen):
     """Restaura la base de datos completa desde un backup (superadmin)."""
+    _requerir_rol("superadmin")
     import shutil
     try:
         shutil.copy2(ruta_origen, DB_PATH)
@@ -1526,6 +1635,7 @@ def importar_backup(ruta_origen):
 
 def importar_backup_empresa(empresa_id, ruta_origen):
     """Restaura datos de empresa desde backup. Usa dict() para evitar sqlite3.Row.get() errors."""
+    _verificar_scope_empresa(empresa_id)
     import sqlite3 as _sq
     try:
         conn_src = _sq.connect(ruta_origen)
@@ -1716,6 +1826,7 @@ def validar_salario_minimo(salario):
 # ─── PRÉSTAMOS ────────────────────────────────────────────────────────────────
 
 def crear_prestamo(empresa_id, empleado_id, monto, fecha, observaciones=""):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         conn.execute(
@@ -1731,6 +1842,7 @@ def crear_prestamo(empresa_id, empleado_id, monto, fecha, observaciones=""):
 
 
 def listar_prestamos(empresa_id, empleado_id=None, estado=None):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     filtros = ["p.empresa_id=?"]
     params = [empresa_id]
@@ -1753,6 +1865,7 @@ def listar_prestamos(empresa_id, empleado_id=None, estado=None):
 
 def obtener_prestamo_activo(empresa_id, empleado_id):
     """Obtiene el préstamo activo de un empleado (saldo pendiente)."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute(
         "SELECT * FROM prestamos WHERE empresa_id=? AND empleado_id=? AND estado='activo' LIMIT 1",
@@ -1764,6 +1877,7 @@ def obtener_prestamo_activo(empresa_id, empleado_id):
 
 def actualizar_prestamo(prestamo_id, monto, observaciones=""):
     conn = get_connection()
+    _verificar_scope_registro(conn, "prestamos", prestamo_id)
     try:
         conn.execute(
             "UPDATE prestamos SET monto=?, saldo=monto-abonado, observaciones=? WHERE id=?",
@@ -1780,6 +1894,7 @@ def actualizar_prestamo(prestamo_id, monto, observaciones=""):
 def abonar_prestamo(prestamo_id, monto_abono):
     """Registra un abono a un préstamo. Si el saldo llega a 0, marca como pagado."""
     conn = get_connection()
+    _verificar_scope_registro(conn, "prestamos", prestamo_id)
     try:
         row = conn.execute("SELECT saldo FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
         if not row:
@@ -1804,6 +1919,7 @@ def abonar_prestamo(prestamo_id, monto_abono):
 
 def eliminar_prestamo(prestamo_id):
     conn = get_connection()
+    _verificar_scope_registro(conn, "prestamos", prestamo_id)
     conn.execute("DELETE FROM prestamos WHERE id=?", (prestamo_id,))
     conn.commit()
     conn.close()
@@ -1814,6 +1930,7 @@ def eliminar_prestamo(prestamo_id):
 
 def crear_contrato(empresa_id, empleado_id, descripcion, valor_total,
                    fecha_inicio, fecha_fin=None, deducciones=0, observaciones=None):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         conn.execute("""
@@ -1831,6 +1948,7 @@ def crear_contrato(empresa_id, empleado_id, descripcion, valor_total,
 
 
 def listar_contratos(empresa_id, estado=None):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     filtro = "AND c.estado=?" if estado else ""
     params = [empresa_id] + ([estado] if estado else [])
@@ -1846,6 +1964,7 @@ def listar_contratos(empresa_id, estado=None):
 
 
 def obtener_contrato(contrato_id, empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     row = conn.execute("""
         SELECT c.*, e.nombre as empleado_nombre, e.documento, e.cargo,
@@ -1862,6 +1981,7 @@ def obtener_contrato(contrato_id, empresa_id):
 
 def actualizar_contrato(contrato_id, empresa_id, descripcion, valor_total,
                         fecha_inicio, fecha_fin=None, deducciones=0, observaciones=None):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         conn.execute("""
@@ -1883,6 +2003,7 @@ def liquidar_contrato(contrato_id, empresa_id, valor_final=None,
                       descontar_prestamos=False):
     """Liquida el contrato: genera nómina especial, guarda colilla, marca como liquidado.
     Si descontar_prestamos=True, descuenta el saldo total de préstamos activos del empleado."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         cont = conn.execute(
@@ -1939,6 +2060,7 @@ def liquidar_contrato(contrato_id, empresa_id, valor_final=None,
 
 
 def eliminar_contrato(contrato_id, empresa_id):
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     try:
         cont = conn.execute(
@@ -1958,6 +2080,7 @@ def eliminar_contrato(contrato_id, empresa_id):
 
 def obtener_prestamos_activos(empresa_id, empleado_id):
     """Retorna TODOS los préstamos activos de un empleado (permite múltiples)."""
+    _verificar_scope_empresa(empresa_id)
     conn = get_connection()
     rows = conn.execute(
         "SELECT * FROM prestamos WHERE empresa_id=? AND empleado_id=? AND estado='activo' ORDER BY fecha DESC",
@@ -1971,6 +2094,7 @@ def obtener_prestamos_activos(empresa_id, empleado_id):
 
 def exportar_nomina_excel(empresa_id, periodo, ruta_destino):
     """Exporta la nómina de un período a un archivo Excel (.xlsx)."""
+    _verificar_scope_empresa(empresa_id)
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -2112,6 +2236,7 @@ def exportar_nomina_excel(empresa_id, periodo, ruta_destino):
 def registrar_colilla_generada(nomina_id, colilla_path):
     """Guarda la ruta de la colilla PDF en el registro de nómina."""
     conn = get_connection()
+    _verificar_scope_registro(conn, "nominas", nomina_id)
     conn.execute("UPDATE nominas SET colilla_path=? WHERE id=?", (colilla_path, nomina_id))
     conn.commit()
     conn.close()
@@ -2120,6 +2245,7 @@ def registrar_colilla_generada(nomina_id, colilla_path):
 def obtener_colilla_path(nomina_id):
     """Retorna la ruta de la colilla si ya fue generada, o None."""
     conn = get_connection()
+    _verificar_scope_registro(conn, "nominas", nomina_id)
     row = conn.execute("SELECT colilla_path FROM nominas WHERE id=?", (nomina_id,)).fetchone()
     conn.close()
     if row and row["colilla_path"] and os.path.exists(row["colilla_path"]):
@@ -2175,6 +2301,8 @@ def _instrucciones_clave_app(dominio):
 
 def enviar_colilla_email(empresa, colilla_path, destino, nombre_empleado, periodo, neto):
     """Envía la colilla de pago usando las credenciales SMTP de la empresa."""
+    if empresa.get("id"):
+        _verificar_scope_empresa(empresa["id"])
     import smtplib, ssl
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText

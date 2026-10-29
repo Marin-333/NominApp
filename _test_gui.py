@@ -13,6 +13,7 @@ os.makedirs(paths.REPORTS_DIR, exist_ok=True)
 import database as db
 db.DB_PATH = paths.DB_PATH
 db.init_db(); db.migrar_base_datos()
+db.establecer_sesion(db.autenticar("superadmin", "Admin2024!"))  # Fase 3
 
 db.crear_empresa("Test SA", "900111", "Calle 1", "3001234", periodo_pago="quincenal")
 EID = db.listar_empresas()[0]["id"]

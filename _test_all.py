@@ -55,6 +55,7 @@ run("migrar_base_datos (idempotente)", db.migrar_base_datos)
 u = run("autenticar superadmin", lambda: db.autenticar("superadmin", "Admin2024!"))
 check("superadmin rol", u and u["rol"] == "superadmin")
 check("auth incorrecta", db.autenticar("superadmin", "mala") is None)
+db.establecer_sesion(u)  # Sesión requerida por el control de acceso (Fase 3)
 
 # Empresa
 ok, msg = db.crear_empresa("Test SA", "900111", "Calle 1", "3001234", periodo_pago="mensual")
@@ -79,11 +80,47 @@ check("admin duplicado rechazado", not ok)
 run("actualizar_admin", lambda: db.actualizar_admin(adm["id"], "admin1", "Admin Uno B", EID))
 run("cambiar_password", lambda: db.cambiar_password(adm["id"], "NewPass2026"))
 check("nuevo pass auth", db.autenticar("admin1", "NewPass2026") is not None)
+db.establecer_sesion(adm)   # sesión del admin para su propia cuenta
 ok, msg = db.cambiar_password_propio(adm["id"], "mala", "NuevaPass1")
 check("cambio propio pass incorrecta", not ok)
+try:
+    db.cambiar_password_propio(u["id"], "x", "OtraPass1"); ajena = False
+except PermissionError:
+    ajena = True
+check("admin NO toca cuenta ajena", ajena)
+db.establecer_sesion(u)     # volver a superadmin
 ok, msg = db.toggle_activo(adm["id"])
 check("toggle admin off", ok and db.autenticar("admin1", "NewPass2026") is None)
 db.toggle_activo(adm["id"])
+
+# ── Control de acceso por sesión (Fase 3) ──────────────────────────────────
+ok, msg = db.crear_empresa("Otra SA", "900222", "Dir 2", "3009999", periodo_pago="mensual")
+EID2 = [e for e in db.listar_empresas() if e["nit"] == "900222"][0]["id"]
+db.establecer_sesion(adm)   # admin de EID
+
+def _denegado(fn):
+    try:   fn(); return False
+    except PermissionError: return True
+
+check("admin NO crea en otra empresa", _denegado(
+    lambda: db.crear_empleado(EID2, "X", "999", "Cargo", 1000000, "2024-01-01")))
+check("admin NO lista otra empresa", _denegado(
+    lambda: db.listar_empleados(EID2)))
+check("admin NO crea empresas", _denegado(
+    lambda: db.crear_empresa("X SA", "1", "d", "t")))
+check("admin NO crea admins", _denegado(
+    lambda: db.crear_admin("x2", "Pass1234", "X", EID)))
+check("admin NO resetea passwords", _denegado(
+    lambda: db.cambiar_password(adm["id"], "Pass1234")))
+check("admin NO exporta backup completo", _denegado(
+    lambda: db.exportar_backup(os.devnull)))
+check("admin NO ve bitácora global", _denegado(
+    lambda: db.listar_bitacora(50)))
+check("admin SÍ opera su empresa", isinstance(db.listar_empleados(EID), list))
+check("admin SÍ ve su bitácora", isinstance(db.listar_bitacora(10, empresa_id=EID), list))
+check("sin sesión = sin acceso", (db.cerrar_sesion() or True) and _denegado(
+    lambda: db.listar_empleados(EID)))
+db.establecer_sesion(u)   # volver a superadmin para el resto del test
 
 # Empleados
 ok, msg = db.crear_empleado(EID, "Juan Perez", "1001", "Operario", 2000000, "2024-01-15",

@@ -33,10 +33,15 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [ ] Backups cifrados o con contraseña; documentar que `reports/`, `fotos/` y exports quedan en claro
 - [ ] Migrar dinero `REAL` → `INTEGER` (centavos) para evitar errores de redondeo — opcional pero recomendado
 
-## Fase 3 — Autorización
+## Fase 3 — Autorización ✅ (completada)
 
-- [ ] Pasar `usuario` de sesión a funciones de escritura y validar `rol` + `empresa_id` en la capa de datos (anti-IDOR: un admin no debe tocar otra empresa aunque ocultar botones falle)
-- [ ] Pruebas de que un admin no puede acceder a datos/funciones de superadmin ni de otra empresa
+- [x] Sesión de seguridad en capa de datos: `establecer_sesion`/`cerrar_sesion`/`sesion_actual` en `database.py`, alimentada desde `app.py` en login/logout/expiración por inactividad
+- [x] `_requerir_rol("superadmin")` en CRUD de empresas, gestión de admins y backups completos
+- [x] `_verificar_scope_empresa` en ~35 funciones que reciben `empresa_id` (empleados, nóminas, préstamos, contratos, colillas, Excel, bitácora, backup por empresa) — admin solo toca su empresa; superadmin todas
+- [x] `_verificar_scope_registro` resuelve `empresa_id` desde la fila cuando la función solo recibe un ID (abonar/eliminar préstamo, colillas, `nomina_existe_id`)
+- [x] `verificar_password_usuario`/`cambiar_password_propio` exigen cuenta propia o superadmin (`_verificar_cuenta_propia`)
+- [x] Sin sesión activa → `PermissionError` en cualquier función protegida (no hay "modo abierto")
+- [x] Pruebas: admin no puede crear/listar en otra empresa, no crea empresas/admins, no resetea passwords, no exporta backup completo, no ve bitácora global; sí opera su empresa; sin sesión se rechaza todo (`_test_all.py`, 10 checks nuevos)
 
 ## Fase 4 — Cumplimiento de nómina (pre-requisito DIAN)
 

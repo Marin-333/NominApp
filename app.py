@@ -396,6 +396,7 @@ class LoginWin(tk.Tk):
         if user.get("debe_cambiar_password"):
             if not self._forzar_cambio_password(user, p):
                 return
+        db.establecer_sesion(user)
         self.destroy()
         (SuperAdminWin if user["rol"] == "superadmin" else AdminWin)(user).mainloop()
 
@@ -514,6 +515,7 @@ class BaseWin(tk.Tk):
                 messagebox.showinfo("Sesión expirada",
                     "La sesión se cerró por inactividad.\n"
                     "Ingresa nuevamente.", parent=self)
+                db.cerrar_sesion()
                 self.destroy(); LoginWin().mainloop(); return
             self.after(10_000, self._vigilar_inactividad)
         except tk.TclError:
@@ -572,7 +574,8 @@ class BaseWin(tk.Tk):
     def _sec(self, key): self._nav(key, getattr(self, f"_s_{key}"))
     def _clr(self):
         for w in self.ct.winfo_children(): w.destroy()
-    def _logout(self): self.destroy(); LoginWin().mainloop()
+    def _logout(self):
+        db.cerrar_sesion(); self.destroy(); LoginWin().mainloop()
 
     # ── UI helpers ──────────────────────────────────────────────────────────
     def _hdr(self, title, btn=None, cmd=None, icon="＋"):

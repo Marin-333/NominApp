@@ -2180,6 +2180,26 @@ class AdminWin(BaseWin):
         tk.Label(info, text=plazo_txt, font=F["bd"], bg=C["card"], fg=plazo_col
             ).pack(padx=14, pady=(0,10), anchor="w")
 
+        # Aviso de modo simulado: la transmisión NO sale de la app todavía
+        try:
+            import dian_service
+            simulado = dian_service.MODO_SIMULADO
+        except Exception:
+            simulado = True
+        if simulado:
+            prod = (cfg.get("ambiente") == "produccion")
+            aviso = ("⚠  MODO SIMULADO — la transmisión NO envía nada a la DIAN. "
+                     "Los documentos quedan 'transmitidos' solo en esta app."
+                     + ("\n   ⛔ AMBIENTE EN PRODUCCION + SIMULADO: cambia a "
+                        "'habilitacion' en Configuración hasta contratar proveedor."
+                        if prod else
+                        " Cuando se contrate un proveedor, este puente se "
+                        "reemplaza por el envío real."))
+            tk.Label(self.ct, text=aviso,
+                font=F["bd"], bg=C["bg"],
+                fg=C["err"] if prod else C["accent"], wraplength=800,
+                justify="left").pack(padx=24, anchor="w", pady=(0,8))
+
         # Acciones de configuración
         fr = tk.Frame(self.ct, bg=C["bg"]); fr.pack(padx=24, anchor="w", pady=(0,8))
         Btn(fr,"Configuración",cmd=self._form_config_dian,sty="out",icon="⚙").pack(side="left",padx=(0,8))

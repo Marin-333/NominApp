@@ -649,6 +649,16 @@ def migrar_base_datos():
         except sqlite3.OperationalError:
             pass
 
+    # Fase 6 — hash chain en bitácora + consentimiento Habeas Data
+    for ddl in (
+        "ALTER TABLE bitacora ADD COLUMN hash TEXT",
+        "ALTER TABLE empleados ADD COLUMN consentimiento_fecha TEXT",
+    ):
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
     # Marcar superadmin que aún use la contraseña de fábrica (hash SHA-256 legado)
     sha_fabrica = hashlib.sha256(PASSWORD_FABRICA.encode("utf-8")).hexdigest()
     c.execute("""UPDATE usuarios SET debe_cambiar_password=1
@@ -1232,7 +1242,8 @@ def eliminar_empleado(emp_id, empresa_id):
     return True, "Empleado desactivado."
 
 
-def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False):
+def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False,
+                                 forzar=False):
     """Elimina completamente un empleado y opcionalmente sus registros de nómina."""
     _verificar_scope_empresa(empresa_id)
     conn = get_connection()
@@ -1250,6 +1261,25 @@ def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False):
             "SELECT COUNT(*) FROM prestaciones WHERE empleado_id=? AND empresa_id=?",
             (emp_id, empresa_id)
         ).fetchone()[0]
+
+        # Retención legal: documentos laborales mínimo 10 años
+        # (C. de Comercio art. 60) — bloquear si son recientes
+        if not forzar:
+            antig = conn.execute(
+                "SELECT MIN(generado_en) FROM nominas WHERE empleado_id=? AND empresa_id=?",
+                (emp_id, empresa_id)).fetchone()[0]
+            if antig:
+                try:
+                    edad = (datetime.now() - datetime.strptime(
+                        str(antig)[:10], "%Y-%m-%d")).days / 365.25
+                    if edad < 10:
+                        conn.close()
+                        return False, ("RETENCION: Sus nóminas tienen menos de "
+                            "10 años (retención legal, C. de Comercio art. 60). "
+                            "Si continúas, los documentos se perderán antes de "
+                            "cumplir el plazo legal.")
+                except ValueError:
+                    pass
 
         if (nominas_count > 0 or docs_count > 0 or prest_count > 0) \
                 and not eliminar_nominas:
@@ -1823,18 +1853,70 @@ def eliminar_imagen(imagen_path):
 # ─── BITÁCORA DE AUDITORÍA ───────────────────────────────────────────────────
 
 def registrar_bitacora(usuario_id, usuario_nom, accion, detalle="", empresa_id=None):
-    """Registra una acción en la bitácora de auditoría."""
+    """Registra una acción en la bitácora con cadena de hash: cada fila
+    firma la anterior (tamper-evidence — no es inmutable al 100% en local,
+    pero cualquier edición o borrado rompe la cadena)."""
     conn = get_connection()
     try:
-        conn.execute(
-            "INSERT INTO bitacora (empresa_id, usuario_id, usuario_nom, accion, detalle) VALUES (?,?,?,?,?)",
-            (empresa_id, usuario_id, usuario_nom, accion, detalle)
-        )
+        prev = conn.execute(
+            "SELECT hash FROM bitacora ORDER BY id DESC LIMIT 1").fetchone()
+        prev_hash = prev["hash"] if prev and prev["hash"] else "GENESIS"
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cadena = f"{prev_hash}|{empresa_id}|{usuario_id}|{usuario_nom}|{accion}|{detalle}|{fecha}"
+        h = hashlib.sha256(cadena.encode("utf-8")).hexdigest()
+        try:
+            conn.execute(
+                "INSERT INTO bitacora (empresa_id, usuario_id, usuario_nom, accion, detalle, fecha, hash) VALUES (?,?,?,?,?,?,?)",
+                (empresa_id, usuario_id, usuario_nom, accion, detalle, fecha, h)
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                "INSERT INTO bitacora (empresa_id, usuario_id, usuario_nom, accion, detalle) VALUES (?,?,?,?,?)",
+                (empresa_id, usuario_id, usuario_nom, accion, detalle)
+            )
         conn.commit()
     except Exception:
         pass  # La bitácora no debe interrumpir operaciones
     finally:
         conn.close()
+
+
+def verificar_bitacora(empresa_id=None):
+    """Recomputa la cadena de hash. Devuelve (ok, id_fila_rota_o_None).
+    Las filas antiguas sin hash se ignoran (pre-cadena)."""
+    conn = get_connection()
+    if empresa_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM bitacora WHERE empresa_id=? ORDER BY id",
+            (empresa_id,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM bitacora ORDER BY id").fetchall()
+    conn.close()
+    # Reconstruir prev_hash usando TODA la tabla (la cadena es global)
+    prev_hash = None
+    for r in rows:
+        r = dict(r)
+        if not r.get("hash"):
+            continue
+        if prev_hash is None:
+            prev_hash = "GENESIS"
+        cadena = (f"{prev_hash}|{r.get('empresa_id')}|{r.get('usuario_id')}"
+                  f"|{r.get('usuario_nom')}|{r.get('accion')}"
+                  f"|{r.get('detalle')}|{r.get('fecha')}")
+        if hashlib.sha256(cadena.encode("utf-8")).hexdigest() != r["hash"]:
+            return False, r["id"]
+        prev_hash = r["hash"]
+    return True, None
+
+
+def _auditar(accion, detalle="", empresa_id=None):
+    """Registra en bitácora usando la sesión activa (si la hay)."""
+    try:
+        s = sesion_actual() or {}
+        registrar_bitacora(s.get("usuario_id"), "sistema", accion, detalle,
+                           empresa_id=empresa_id or s.get("empresa_id"))
+    except Exception:
+        pass
 
 
 def listar_bitacora(limite=200, empresa_id=None):
@@ -2033,6 +2115,7 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
         conn_dst.commit()
         conn_dst.close()
         conn_src.close()
+        _auditar("Exportó backup de empresa", ruta_destino, empresa_id)
         return True, f"Backup de empresa exportado a:\n{ruta_destino}"
     except Exception as e:
         return False, f"Error al exportar backup de empresa: {e}"
@@ -2063,6 +2146,7 @@ def importar_backup(ruta_origen, password=None):
             else:
                 _cifrar_archivo_db(tmp)   # backup antiguo en claro
         os.replace(tmp, DB_PATH)
+        _auditar("Restauró backup completo", ruta_origen)
         return True, "Base de datos restaurada correctamente.\nReinicie la aplicación para ver los cambios."
     except Exception as e:
         return False, f"Error al importar backup: {e}"
@@ -2632,7 +2716,7 @@ _EMP_DIAN_COLS = (
     "primer_nombre", "otros_nombres", "primer_apellido", "segundo_apellido",
     "tipo_documento", "tipo_trabajador", "subtipo_trabajador", "tipo_contrato",
     "municipio_laboral", "alto_riesgo_pension", "eps", "arl", "fondo_pension",
-    "fondo_cesantias", "banco", "fecha_retiro",
+    "fondo_cesantias", "banco", "fecha_retiro", "consentimiento_fecha",
 )
 
 
@@ -3040,6 +3124,8 @@ def generar_documento_dian(empresa_id, empleado_id, periodo, regenerar=False):
         conn.commit()
 
         msg = f"Documento {numero} generado (CUNE: {cune[:16]}…)."
+        _auditar("Generó documento DIAN",
+                 f"{numero} — {emp.get('nombre','')} — {periodo}", empresa_id)
         if faltantes:
             msg += f" ⚠ Faltan datos DIAN: {', '.join(faltantes)}"
         return True, msg, doc_id, faltantes

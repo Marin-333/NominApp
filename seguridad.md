@@ -75,13 +75,14 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [ ] QR + CUNE en la representación gráfica PDF del documento mensual
 - [ ] XML de notas de ajuste con estructura `NominaIndividualDeAjuste` completa (hoy es el documento estándar + nota de referencia)
 
-## Fase 6 — Auditoría y Habeas Data
+## Fase 6 — Auditoría y Habeas Data ✅
 
-- [ ] Bitácora: cubrir logins, exports PDF/Excel, consultas de datos sensibles
-- [ ] Cadena de hash en bitácora (cada fila firma la anterior — tamper-evidence; documentar que no es inmutable al 100% en local)
-- [ ] Aviso de privacidad (Ley 1581 de 2012) en app + PDF de consentimiento firmable; campo `consentimiento_fecha`/`doc_path` en empleados
-- [ ] Respetar retención legal (mínimo 10 años, C. de Comercio art. 60) antes de borrado definitivo
-- [ ] Firma de código del `.exe` + `upx=False` en `app.spec` (menos falsos positivos de antivirus y bloqueos de SmartScreen)
+- [x] Bitácora cubre: logins/fallos/bloqueos, exports/imports de backups, generación de documentos DIAN (`_auditar` usa la sesión activa)
+- [x] Cadena de hash en bitácora (tamper-evidence): cada fila firma la anterior con SHA-256; `verificar_bitacora()` re-computa y detecta edición/borrado (verificado en tests: alterar `detalle` rompe la cadena). **Limitación documentada**: en local no es inmutable al 100% — quien tenga acceso a la BD puede re-generar la cadena completa; sirve como evidencia de manipulación, no como blockchain
+- [x] Habeas Data (Ley 1581/2012): campo `consentimiento_fecha` en empleados (sección DIAN del formulario) + aviso de privacidad visible en el form
+- [x] Retención legal: `eliminar_empleado_definitivo` bloquea si las nóminas tienen <10 años (C. de Comercio art. 60); la GUI muestra la advertencia y exige confirmación explícita (`forzar=True`) para proceder
+- [x] `upx=False` en `app.spec` (menos falsos positivos AV/SmartScreen). **Pendiente externo**: firma de código del exe — requiere comprar certificado de firma de código; dejar para producción junto con el proveedor DIAN
+- [ ] PDF de consentimiento firmable + `doc_path` del consentimiento firmado (pendiente menor)
 
 ---
 

@@ -411,6 +411,30 @@ db.establecer_sesion(u)
 ok, msg = db.eliminar_prestacion(vac["id"])
 check("eliminar prestación", ok)
 
+# ── Fase 6: cadena de hash, retención legal y consentimiento ──────────────
+ok_b, rota = db.verificar_bitacora()
+check("bitácora cadena íntegra", ok_b and rota is None)
+ct = db.get_connection()
+ult = ct.execute(
+    "SELECT id, hash, detalle FROM bitacora ORDER BY id DESC LIMIT 1").fetchone()
+print("   última fila bitácora:", dict(ult))
+ct.execute("UPDATE bitacora SET detalle='ALTERADO' WHERE id=?", (ult["id"],))
+ct.commit(); ct.close()
+ok_b2, rota2 = db.verificar_bitacora()
+check("tamper en bitácora detectado", not ok_b2 and rota2 is not None,
+      f"ok={ok_b2} rota={rota2} hash={ult['hash'] is not None}")
+# Consentimiento Habeas Data
+ok, msg = db.actualizar_empleado_dian(E1, EID, consentimiento_fecha="2026-01-10")
+check("consentimiento guardado",
+      ok and db.obtener_empleado(E1, EID)["consentimiento_fecha"] == "2026-01-10")
+# Retención legal <10 años bloquea; forzar permite
+ok, msg = db.eliminar_empleado_definitivo(E5, EID, eliminar_nominas=True)
+check("retención bloquea borrado reciente",
+      not ok and msg.startswith("RETENCION:"), msg)
+ok, msg = db.eliminar_empleado_definitivo(E5, EID, eliminar_nominas=True,
+                                          forzar=True)
+check("borrado con forzar", ok, msg)
+
 # Contratos
 ok, msg = db.crear_contrato(EID, E2, "Contrato obra", 5000000, "2026-09-01", "2026-12-31", 100000, "obs")
 check("crear_contrato", ok, msg)
@@ -538,7 +562,8 @@ E1 = next(e["id"] for e in db.listar_empleados(EID, True) if e["documento"] == "
 E2 = next(e["id"] for e in db.listar_empleados(EID, True) if e["documento"] == "2002")
 ok, msg = db.eliminar_empleado_definitivo(E1, EID, eliminar_nominas=False)
 check("rechaza eliminar con nóminas si no se pide", not ok, msg)
-ok, msg = db.eliminar_empleado_definitivo(E2, EID, eliminar_nominas=True)
+ok, msg = db.eliminar_empleado_definitivo(E2, EID, eliminar_nominas=True,
+                                         forzar=True)
 check("eliminar definitivo", ok, msg)
 check("empleado borrado", db.obtener_empleado(E2, EID) is None)
 

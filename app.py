@@ -1528,6 +1528,12 @@ class AdminWin(BaseWin):
         e_banco = fld("Banco (código o nombre)", e.get("banco","")      if e else "")
         e_fret  = fld("Fecha de retiro (YYYY-MM-DD, si aplica)",
                       e.get("fecha_retiro","") if e else "")
+        e_cons  = fld("Fecha consentimiento datos personales (YYYY-MM-DD) — Ley 1581/2012",
+                      e.get("consentimiento_fecha","") if e else "")
+        tk.Label(p, text="La ley de Habeas Data exige consentimiento del "
+            "trabajador para tratar sus datos personales.",
+            font=F["sm"], bg=C["bg"], fg=C["muted"], wraplength=460,
+            justify="left").pack(padx=24, anchor="w", pady=(0,10))
         arp_var = tk.IntVar(value=int(e.get("alto_riesgo_pension") or 0) if e else 0)
         tk.Checkbutton(p, text="Alto riesgo de pensión (oficio de alto riesgo)",
             variable=arp_var, font=F["bd"], bg=C["bg"], fg=C["txt"],
@@ -1618,6 +1624,7 @@ class AdminWin(BaseWin):
                 "fondo_cesantias": e_fces.val() or None,
                 "banco": e_banco.val() or None,
                 "fecha_retiro": fret or None,
+                "consentimiento_fecha": e_cons.val() or None,
                 "alto_riesgo_pension": int(arp_var.get()),
             }
 
@@ -1759,6 +1766,11 @@ class AdminWin(BaseWin):
                     ok, msg = db.eliminar_empleado(eid, self.eid)
                 else:
                     ok, msg = db.eliminar_empleado_definitivo(eid, self.eid, True)
+                    if not ok and msg.startswith("RETENCION:"):
+                        if messagebox.askyesno("Retención legal",
+                            msg[10:]+"\n\n¿Eliminar de todos modos?",parent=self):
+                            ok, msg = db.eliminar_empleado_definitivo(
+                                eid, self.eid, True, forzar=True)
 
                 if ok:
                     messagebox.showinfo("✓ Éxito", msg, parent=win)

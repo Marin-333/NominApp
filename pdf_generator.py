@@ -867,7 +867,7 @@ def generar_certificado_laboral(empleado, empresa, empresa_id=None):
     story.append(Paragraph(parrafo3, s_body))
     story.append(Spacer(1, 0.3*cm))
     story.append(Paragraph(
-        f"Se expide en {empresa.get('direccion','') or 'Colombia'} "
+        f"Se expide en {empresa.get('municipio','') or 'Colombia'} "
         f"el día {fecha_texto}.", s_body))
 
     story.append(Spacer(1, 2.5*cm))

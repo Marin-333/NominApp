@@ -68,19 +68,21 @@ run("actualizar_empresa", lambda: db.actualizar_empresa(EID2, "Quin SA2", "90022
 check("periodo quincenal guardado", db.obtener_empresa(EID2)["periodo_pago"] == "quincenal")
 
 # Admin
-ok, msg = db.crear_admin("admin1", "pass123", "Admin Uno", EID)
+ok, msg = db.crear_admin("admin1", "Pass1234", "Admin Uno", EID)
 check("crear_admin", ok, msg)
-adm = db.autenticar("admin1", "pass123")
+ok, msg = db.crear_admin("admin_debil", "abc", "Pass Débil", EID)
+check("password débil rechazada", not ok)
+adm = db.autenticar("admin1", "Pass1234")
 check("auth admin", adm is not None and adm["rol"] == "admin")
-ok, msg = db.crear_admin("admin1", "x", "Dup", EID)
+ok, msg = db.crear_admin("admin1", "DupPass1", "Dup", EID)
 check("admin duplicado rechazado", not ok)
 run("actualizar_admin", lambda: db.actualizar_admin(adm["id"], "admin1", "Admin Uno B", EID))
-run("cambiar_password", lambda: db.cambiar_password(adm["id"], "newpass"))
-check("nuevo pass auth", db.autenticar("admin1", "newpass") is not None)
-ok, msg = db.cambiar_password_propio(adm["id"], "mala", "x")
+run("cambiar_password", lambda: db.cambiar_password(adm["id"], "NewPass2026"))
+check("nuevo pass auth", db.autenticar("admin1", "NewPass2026") is not None)
+ok, msg = db.cambiar_password_propio(adm["id"], "mala", "NuevaPass1")
 check("cambio propio pass incorrecta", not ok)
 ok, msg = db.toggle_activo(adm["id"])
-check("toggle admin off", ok and db.autenticar("admin1", "newpass") is None)
+check("toggle admin off", ok and db.autenticar("admin1", "NewPass2026") is None)
 db.toggle_activo(adm["id"])
 
 # Empleados

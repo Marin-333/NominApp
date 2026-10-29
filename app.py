@@ -6,7 +6,7 @@ colillas de pago independientes de la nómina.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
-import os, re, subprocess, sys, threading, logging
+import os, re, subprocess, sys, threading, logging, time
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
@@ -123,9 +123,13 @@ def abrir(path, parent=None):
             if parent: messagebox.showwarning("Aviso",
                 f"No se pudo abrir automáticamente.\nRuta: {path}", parent=parent)
 
-def val_pass(nueva, conf, minimo=6):
+def val_pass(nueva, conf, minimo=8):
     if not nueva:           return False, "La contraseña no puede estar vacía."
     if len(nueva) < minimo: return False, f"Mínimo {minimo} caracteres."
+    if not any(c.isalpha() for c in nueva):
+        return False, "Debe incluir al menos una letra."
+    if not any(c.isdigit() for c in nueva):
+        return False, "Debe incluir al menos un número."
     if nueva != conf:       return False, "Las contraseñas no coinciden."
     return True, ""
 
@@ -377,13 +381,78 @@ class LoginWin(tk.Tk):
         u = self.eu.val(); p = self.ep.get().strip()
         if not u: self.le.config(text="⚠  Ingresa tu usuario."); return
         if not p: self.le.config(text="⚠  Ingresa tu contraseña."); return
-        try:   user = db.autenticar(u, p)
+        try:
+            bloqueo = db.usuario_bloqueado(u)
+            if bloqueo:
+                self.le.config(
+                    text=f"🔒  Cuenta bloqueada por intentos fallidos.\n"
+                         f"Intenta de nuevo en {bloqueo} min.")
+                return
+            user = db.autenticar(u, p)
         except Exception as ex: self.le.config(text=f"Error BD: {ex}"); return
         if not user:
             self.le.config(text="✗  Credenciales incorrectas.")
             self.ep.delete(0, tk.END); return
+        if user.get("debe_cambiar_password"):
+            if not self._forzar_cambio_password(user, p):
+                return
         self.destroy()
         (SuperAdminWin if user["rol"] == "superadmin" else AdminWin)(user).mainloop()
+
+    def _forzar_cambio_password(self, user, actual):
+        """Modal obligatorio cuando el flag debe_cambiar_password está activo.
+        Retorna True si cambió la contraseña (puede entrar), False si canceló."""
+        win = tk.Toplevel(self); win.title("Cambio de contraseña obligatorio")
+        win.geometry("440x420"); win.resizable(False, False)
+        win.configure(bg=C["bg"]); win.transient(self); win.grab_set()
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+        tk.Label(win, text="🔐  Debes cambiar tu contraseña",
+            font=F["h3"], bg=C["bg"], fg=C["txt"]).pack(pady=(20,4), padx=24, anchor="w")
+        tk.Label(win,
+            text="Estás usando una contraseña temporal o de fábrica.\n"
+                 "Por seguridad, define una nueva antes de continuar.",
+            font=F["bd"], bg=C["bg"], fg=C["sub"], justify="left"
+            ).pack(padx=24, anchor="w", pady=(0,8))
+        tk.Label(win, text="Requisitos: mínimo 8 caracteres, una letra y un número.",
+            font=F["sm"], bg=C["bg"], fg=C["muted"], justify="left"
+            ).pack(padx=24, anchor="w", pady=(0,12))
+
+        tk.Label(win, text="Nueva contraseña *", font=F["sm"],
+            bg=C["bg"], fg=C["sub"]).pack(padx=24, anchor="w")
+        e_new = Inp(win, show="●", width=44); e_new.pack(padx=24, fill="x", ipady=7, pady=(2,12))
+        tk.Label(win, text="Confirmar contraseña *", font=F["sm"],
+            bg=C["bg"], fg=C["sub"]).pack(padx=24, anchor="w")
+        e_cf = Inp(win, show="●", width=44); e_cf.pack(padx=24, fill="x", ipady=7, pady=(2,8))
+
+        lbl = tk.Label(win, text="", font=F["sm"], bg=C["bg"],
+            fg=C["err"], wraplength=390, justify="left")
+        lbl.pack(padx=24, anchor="w")
+        res = {"ok": False}
+
+        def save():
+            nueva = e_new.get().strip(); conf = e_cf.get().strip()
+            ok_v, msg_v = val_pass(nueva, conf)
+            if not ok_v: lbl.config(text=f"⚠  {msg_v}"); return
+            if nueva == actual:
+                lbl.config(text="⚠  La nueva contraseña no puede ser igual a la actual.")
+                return
+            try:    ok, msg = db.cambiar_password_propio(user["id"], actual, nueva)
+            except Exception as ex: lbl.config(text=f"Error: {ex}"); return
+            if ok:
+                res["ok"] = True
+                messagebox.showinfo("✓ Contraseña actualizada",
+                    "Tu contraseña fue actualizada. Ya puedes continuar.", parent=win)
+                win.destroy()
+            else:
+                lbl.config(text=f"✗  {msg}")
+
+        br = tk.Frame(win, bg=C["bg"]); br.pack(pady=12, padx=24, anchor="e")
+        Btn(br, "Cancelar",          cmd=win.destroy, sty="gh").pack(side="left", padx=(0,8))
+        Btn(br, "Guardar y entrar",  cmd=save, sty="pri", icon="💾").pack(side="left")
+        e_new.focus_set()
+        self.wait_window(win)
+        return res["ok"]
 
 # ─── BASE WINDOW ──────────────────────────────────────────────────────────────
 class BaseWin(tk.Tk):
@@ -426,6 +495,70 @@ class BaseWin(tk.Tk):
 
         self.ct = tk.Frame(main, bg=C["bg"])
         self.ct.pack(side="right", fill="both", expand=True)
+
+        # Cierre de sesión por inactividad
+        self._ultima_actividad = time.monotonic()
+        self.bind_all("<Key>",    self._registrar_actividad, add="+")
+        self.bind_all("<Button>", self._registrar_actividad, add="+")
+        self._vigilar_inactividad()
+
+    SESION_MINUTOS = 15  # auto-logout por inactividad
+
+    def _registrar_actividad(self, *_):
+        self._ultima_actividad = time.monotonic()
+
+    def _vigilar_inactividad(self):
+        try:
+            if not self.winfo_exists(): return
+            if time.monotonic() - self._ultima_actividad > self.SESION_MINUTOS*60:
+                messagebox.showinfo("Sesión expirada",
+                    "La sesión se cerró por inactividad.\n"
+                    "Ingresa nuevamente.", parent=self)
+                self.destroy(); LoginWin().mainloop(); return
+            self.after(10_000, self._vigilar_inactividad)
+        except tk.TclError:
+            pass  # ventana ya destruida
+
+    def _reautenticar(self, motivo):
+        """Pide la contraseña del usuario en sesión antes de una acción
+        destructiva. Retorna True si se verificó."""
+        win = tk.Toplevel(self); win.title("Confirmar identidad")
+        win.geometry("420x300"); win.resizable(False, False)
+        win.configure(bg=C["bg"]); win.transient(self); win.grab_set()
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+        tk.Label(win, text="🔐  Confirmar identidad", font=F["h3"],
+            bg=C["bg"], fg=C["txt"]).pack(pady=(20,4), padx=24, anchor="w")
+        tk.Label(win, text=motivo, font=F["bd"], bg=C["bg"], fg=C["sub"],
+            wraplength=370, justify="left").pack(padx=24, anchor="w", pady=(0,12))
+
+        tk.Label(win, text=f"Contraseña de {self.user['nombre']} *", font=F["sm"],
+            bg=C["bg"], fg=C["sub"]).pack(padx=24, anchor="w")
+        e_pw = Inp(win, show="●", width=44); e_pw.pack(padx=24, fill="x", ipady=7, pady=(2,8))
+
+        lbl = tk.Label(win, text="", font=F["sm"], bg=C["bg"],
+            fg=C["err"], wraplength=370, justify="left")
+        lbl.pack(padx=24, anchor="w")
+        res = {"ok": False}
+
+        def verificar(*_):
+            pw = e_pw.get().strip()
+            if not pw: lbl.config(text="⚠  Ingresa tu contraseña."); return
+            try:
+                if db.verificar_password_usuario(self.user["id"], pw):
+                    res["ok"] = True; win.destroy()
+                else:
+                    lbl.config(text="✗  Contraseña incorrecta.")
+                    e_pw.delete(0, tk.END)
+            except Exception as ex: lbl.config(text=f"Error: {ex}")
+
+        e_pw.bind("<Return>", verificar)
+        br = tk.Frame(win, bg=C["bg"]); br.pack(pady=12, padx=24, anchor="e")
+        Btn(br, "Cancelar",   cmd=win.destroy, sty="gh").pack(side="left", padx=(0,8))
+        Btn(br, "Confirmar",  cmd=verificar, sty="pri", icon="🔐").pack(side="left")
+        e_pw.focus_set()
+        self.wait_window(win)
+        return res["ok"]
 
     def _topbar_right(self, tb, badge, badge_color): pass
 
@@ -878,6 +1011,10 @@ class SuperAdminWin(BaseWin):
 
     def _importar_backup_sa(self):
         from tkinter import filedialog
+        if not self._reautenticar(
+            "Vas a reemplazar TODA la base de datos con un backup.\n"
+            "Confirma tu identidad para continuar."):
+            return
         if not messagebox.askyesno("⚠ Confirmar restauración",
             "¿Estás seguro de restaurar un backup COMPLETO?\n\n"
             "⚠ TODOS los datos de TODAS las empresas serán reemplazados.\n"
@@ -1414,6 +1551,10 @@ class AdminWin(BaseWin):
             font=F["h4"], bg=C["bg"], fg=C["err"]).pack(padx=24, anchor="w", pady=(10,0))
         
         def confirmar():
+            if not self._reautenticar(
+                f"Vas a eliminar definitivamente a '{emp['nombre']}'.\n"
+                "Confirma tu identidad para continuar."):
+                return
             mantener = choice.get() == "mantener" and nominas_count > 0
             if mantener:
                 pregunta = (f"¿Inactivar a '{emp['nombre']}'?\n\n"
@@ -3173,6 +3314,10 @@ class AdminWin(BaseWin):
 
     def _importar_backup(self):
         from tkinter import filedialog
+        if not self._reautenticar(
+            "Vas a reemplazar los datos de TU EMPRESA con un backup.\n"
+            "Confirma tu identidad para continuar."):
+            return
         if not messagebox.askyesno("⚠ Confirmar restauración",
             "¿Estás seguro de restaurar un backup de empresa?\n\n"
             "⚠ Los datos de TU EMPRESA serán reemplazados.\n"

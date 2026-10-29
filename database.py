@@ -4,13 +4,82 @@ database.py - Módulo de base de datos SQLite para el sistema de nómina
 import sqlite3
 import hashlib
 import os
+import sys
+import base64
+import ctypes
+import ctypes.wintypes
 import shutil
-from datetime import datetime
+import bcrypt
+from datetime import datetime, timedelta
 
 from paths import DB_PATH, BACKUP_DIR, APP_VERSION
 
 SCHEMA_VERSION = 1
 MAX_AUTOBACKUPS = 10
+
+# ─── Seguridad: contraseñas y secretos ────────────────────────────────────────
+MAX_INTENTOS_LOGIN = 5      # intentos antes de bloquear la cuenta
+MINUTOS_BLOQUEO    = 15     # duración del bloqueo
+PASSWORD_FABRICA   = "Admin2024!"   # contraseña por defecto del superadmin
+
+
+def politica_password_ok(pw: str):
+    """Valida la política de contraseñas: mínimo 8 chars, letra + número."""
+    if not pw:                    return False, "La contraseña no puede estar vacía."
+    if len(pw) < 8:               return False, "Mínimo 8 caracteres."
+    if not any(c.isalpha() for c in pw):
+        return False, "Debe incluir al menos una letra."
+    if not any(c.isdigit() for c in pw):
+        return False, "Debe incluir al menos un número."
+    return True, ""
+
+
+# Cifrado de secretos en reposo con DPAPI (CryptProtectData) — la protección
+# queda ligada al usuario de Windows actual; no hay llave que gestionar.
+if sys.platform == "win32":
+    class _DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    def _dpapi_crypt(data: bytes, protect: bool) -> bytes:
+        blob_in = _DATA_BLOB(
+            len(data),
+            ctypes.cast(ctypes.create_string_buffer(data, len(data)),
+                        ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        fn = (ctypes.windll.crypt32.CryptProtectData if protect
+              else ctypes.windll.crypt32.CryptUnprotectData)
+        if not fn(ctypes.byref(blob_in), None, None, None, None, 0,
+                  ctypes.byref(blob_out)):
+            raise ctypes.WinError()
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(
+                ctypes.cast(blob_out.pbData, ctypes.c_void_p))
+else:
+    def _dpapi_crypt(data: bytes, protect: bool) -> bytes:
+        raise RuntimeError("DPAPI solo está disponible en Windows")
+
+_DPAPI_PREFIX = "dpapi:"
+
+
+def cifrar_secreto(texto: str) -> str:
+    """Cifra un secreto para almacenarlo en BD. Idempotente (si ya viene
+    cifrado lo devuelve igual)."""
+    if not texto or texto.startswith(_DPAPI_PREFIX):
+        return texto
+    return _DPAPI_PREFIX + base64.b64encode(
+        _dpapi_crypt(texto.encode("utf-8"), protect=True)).decode("ascii")
+
+
+def descifrar_secreto(valor: str) -> str:
+    """Descifra un secreto de BD. Valores en texto plano (legado) se
+    devuelven tal cual."""
+    if not valor or not valor.startswith(_DPAPI_PREFIX):
+        return valor or ""
+    return _dpapi_crypt(base64.b64decode(valor[len(_DPAPI_PREFIX):]),
+                        protect=False).decode("utf-8")
 
 
 def get_connection():
@@ -64,11 +133,29 @@ def backup_automatico(max_backups=MAX_AUTOBACKUPS):
 
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    """bcrypt con salt — resistente a fuerza bruta y rainbow tables."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _es_hash_legado(hashed: str) -> bool:
+    """Detecta hashes SHA-256 sin salt del esquema anterior (64 hex)."""
+    return bool(hashed) and len(hashed) == 64 and all(
+        c in "0123456789abcdef" for c in hashed.lower())
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return hash_password(password) == hashed
+    """Verifica contra bcrypt; acepta SHA-256 legado para migración."""
+    if not hashed:
+        return False
+    if hashed.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"),
+                                  hashed.encode("utf-8"))
+        except ValueError:
+            return False
+    if _es_hash_legado(hashed):
+        return hashlib.sha256(password.encode("utf-8")).hexdigest() == hashed
+    return False
 
 
 def init_db():
@@ -99,6 +186,9 @@ def init_db():
             empresa_id  INTEGER REFERENCES empresas(id) ON DELETE SET NULL,
             foto_path   TEXT,
             activo      INTEGER DEFAULT 1,
+            intentos_fallidos     INTEGER DEFAULT 0,
+            bloqueado_hasta       TEXT,
+            debe_cambiar_password INTEGER DEFAULT 0,
             creado_en   TEXT DEFAULT (datetime('now'))
         );
 
@@ -194,8 +284,9 @@ def init_db():
     c.execute("SELECT id FROM usuarios WHERE rol='superadmin' LIMIT 1")
     if not c.fetchone():
         c.execute(
-            "INSERT INTO usuarios (username, password, nombre, rol) VALUES (?,?,?,?)",
-            ("superadmin", hash_password("Admin2024!"), "Super Administrador", "superadmin")
+            """INSERT INTO usuarios (username, password, nombre, rol,
+               debe_cambiar_password) VALUES (?,?,?,?,1)""",
+            ("superadmin", hash_password(PASSWORD_FABRICA), "Super Administrador", "superadmin")
         )
 
     c.execute("INSERT OR REPLACE INTO meta (clave, valor) VALUES ('schema_version', ?)",
@@ -270,7 +361,23 @@ def migrar_base_datos():
         c.execute("ALTER TABLE bitacora ADD COLUMN empresa_id INTEGER")
     except sqlite3.OperationalError:
         pass
-    
+
+    # Seguridad de sesión: lockout y cambio de contraseña obligatorio
+    for ddl in (
+        "ALTER TABLE usuarios ADD COLUMN intentos_fallidos INTEGER DEFAULT 0",
+        "ALTER TABLE usuarios ADD COLUMN bloqueado_hasta TEXT",
+        "ALTER TABLE usuarios ADD COLUMN debe_cambiar_password INTEGER DEFAULT 0",
+    ):
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    # Marcar superadmin que aún use la contraseña de fábrica (hash SHA-256 legado)
+    sha_fabrica = hashlib.sha256(PASSWORD_FABRICA.encode("utf-8")).hexdigest()
+    c.execute("""UPDATE usuarios SET debe_cambiar_password=1
+                 WHERE rol='superadmin' AND password=?""", (sha_fabrica,))
+
     # Migrar prestamos: si la tabla tiene el esquema antiguo (columna cuota), reconstruir
     try:
         columns = [row[1] for row in c.execute("PRAGMA table_info(prestamos)").fetchall()]
@@ -400,6 +507,8 @@ def migrar_base_datos():
 
 def crear_empresa(nombre, nit, direccion, telefono, logo_path=None, periodo_pago='mensual',
                   correo=None, correo_password=None):
+    if correo_password:
+        correo_password = cifrar_secreto(correo_password)
     conn = get_connection()
     try:
         conn.execute(
@@ -431,6 +540,8 @@ def obtener_empresa(empresa_id):
 
 def actualizar_empresa(empresa_id, nombre, nit, direccion, telefono, logo_path=None,
                        periodo_pago='mensual', correo=None, correo_password=None):
+    if correo_password:
+        correo_password = cifrar_secreto(correo_password)
     conn = get_connection()
     try:
         conn.execute(
@@ -458,6 +569,9 @@ def eliminar_empresa(empresa_id):
 # ─── USUARIOS ────────────────────────────────────────────────────────────────
 
 def crear_admin(username, password, nombre, empresa_id, foto_path=None):
+    ok_p, msg_p = politica_password_ok(password)
+    if not ok_p:
+        return False, msg_p
     conn = get_connection()
     try:
         conn.execute(
@@ -494,8 +608,14 @@ def eliminar_usuario(usuario_id):
 
 
 def cambiar_password(usuario_id, nueva_password):
+    """Cambio por un tercero (superadmin resetea admin): obliga a que el
+    usuario la cambie en su próximo login."""
+    ok_p, msg_p = politica_password_ok(nueva_password)
+    if not ok_p:
+        return False, msg_p
     conn = get_connection()
-    conn.execute("UPDATE usuarios SET password=? WHERE id=?",
+    conn.execute("""UPDATE usuarios SET password=?, debe_cambiar_password=1,
+                    intentos_fallidos=0, bloqueado_hasta=NULL WHERE id=?""",
                  (hash_password(nueva_password), usuario_id))
     conn.commit()
     conn.close()
@@ -503,17 +623,31 @@ def cambiar_password(usuario_id, nueva_password):
 
 
 def cambiar_password_propio(usuario_id, password_actual, nueva_password):
+    ok_p, msg_p = politica_password_ok(nueva_password)
+    if not ok_p:
+        return False, msg_p
     conn = get_connection()
     row = conn.execute("SELECT password FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
     conn.close()
     if not row or not verify_password(password_actual, row["password"]):
         return False, "La contraseña actual es incorrecta."
     conn = get_connection()
-    conn.execute("UPDATE usuarios SET password=? WHERE id=?",
+    conn.execute("""UPDATE usuarios SET password=?, debe_cambiar_password=0,
+                    intentos_fallidos=0, bloqueado_hasta=NULL WHERE id=?""",
                  (hash_password(nueva_password), usuario_id))
     conn.commit()
     conn.close()
     return True, "Contraseña actualizada correctamente."
+
+
+def verificar_password_usuario(usuario_id, password) -> bool:
+    """Re-autenticación puntual (operaciones destructivas). No afecta
+    contadores de bloqueo ni hace rehash."""
+    conn = get_connection()
+    row = conn.execute("SELECT password FROM usuarios WHERE id=?",
+                       (usuario_id,)).fetchone()
+    conn.close()
+    return bool(row) and verify_password(password, row["password"])
 
 
 def toggle_activo(usuario_id):
@@ -541,14 +675,98 @@ def obtener_usuario(usuario_id):
     return dict(row) if row else None
 
 
+def _col(row, nombre, default=None):
+    """Acceso seguro a columnas de sqlite3.Row (BD aún no migrada)."""
+    try:
+        v = row[nombre]
+    except (IndexError, KeyError):
+        return default
+    return default if v is None else v
+
+
+def usuario_bloqueado(username) -> int:
+    """Minutos restantes de bloqueo de la cuenta (0 si no está bloqueada
+    o el usuario no existe)."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT bloqueado_hasta FROM usuarios WHERE username=?",
+            (username,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None  # columna aún no migrada
+    conn.close()
+    if not row or not row["bloqueado_hasta"]:
+        return 0
+    try:
+        hasta = datetime.strptime(row["bloqueado_hasta"], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return 0
+    resta = (hasta - datetime.utcnow()).total_seconds()
+    return int(resta // 60) + 1 if resta > 0 else 0
+
+
 def autenticar(username, password):
+    """Login con lockout progresivo, migración SHA-256→bcrypt y bitácora."""
     conn = get_connection()
     row = conn.execute(
         "SELECT * FROM usuarios WHERE username=? AND activo=1", (username,)
     ).fetchone()
-    conn.close()
-    if row and verify_password(password, row["password"]):
-        return dict(row)
+    if not row:
+        conn.close()
+        return None
+    ahora = datetime.utcnow()
+
+    # Cuenta bloqueada temporalmente
+    hasta = _col(row, "bloqueado_hasta")
+    if hasta:
+        try:
+            bloqueado = datetime.strptime(hasta, "%Y-%m-%d %H:%M:%S") > ahora
+        except ValueError:
+            bloqueado = False
+        if bloqueado:
+            conn.close()
+            registrar_bitacora(row["id"], row["nombre"],
+                "Intento de login en cuenta bloqueada", "",
+                empresa_id=row["empresa_id"])
+            return None
+
+    # ── Credenciales correctas ──
+    if verify_password(password, row["password"]):
+        # Rehash transparente si venía en SHA-256 legado
+        nuevo_hash = (hash_password(password)
+                      if _es_hash_legado(row["password"]) else row["password"])
+        debe_cambiar = (1 if password == PASSWORD_FABRICA
+                        else (_col(row, "debe_cambiar_password", 0) or 0))
+        conn.execute("""UPDATE usuarios SET password=?, intentos_fallidos=0,
+                        bloqueado_hasta=NULL, debe_cambiar_password=? WHERE id=?""",
+                     (nuevo_hash, debe_cambiar, row["id"]))
+        conn.commit()
+        conn.close()
+        registrar_bitacora(row["id"], row["nombre"], "Inició sesión", "",
+                           empresa_id=row["empresa_id"])
+        user = dict(row)
+        user["debe_cambiar_password"] = debe_cambiar
+        return user
+
+    # ── Credenciales incorrectas ──
+    intentos = (_col(row, "intentos_fallidos", 0) or 0) + 1
+    if intentos >= MAX_INTENTOS_LOGIN:
+        bloqueo = (ahora + timedelta(minutes=MINUTOS_BLOQUEO)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "UPDATE usuarios SET intentos_fallidos=0, bloqueado_hasta=? WHERE id=?",
+            (bloqueo, row["id"]))
+        detalle = f"{MINUTOS_BLOQUEO} min por {MAX_INTENTOS_LOGIN} intentos fallidos"
+        conn.commit(); conn.close()
+        registrar_bitacora(row["id"], row["nombre"], "Cuenta bloqueada",
+                           detalle, empresa_id=row["empresa_id"])
+    else:
+        conn.execute("UPDATE usuarios SET intentos_fallidos=? WHERE id=?",
+                     (intentos, row["id"]))
+        conn.commit(); conn.close()
+        registrar_bitacora(row["id"], row["nombre"],
+            f"Intento de login fallido ({intentos}/{MAX_INTENTOS_LOGIN})",
+            "", empresa_id=row["empresa_id"])
     return None
 
 
@@ -1964,7 +2182,7 @@ def enviar_colilla_email(empresa, colilla_path, destino, nombre_empleado, period
     from email import encoders
 
     correo  = (empresa.get("correo","") or "").strip()
-    password= (empresa.get("correo_password","") or "").strip()
+    password= descifrar_secreto(empresa.get("correo_password","") or "").strip()
 
     if not correo:
         return False, "La empresa no tiene correo configurado.\nPide al SuperAdmin que lo configure en 'Ajustes de empresa'."

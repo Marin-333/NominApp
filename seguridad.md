@@ -17,14 +17,14 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [x] Tabla `meta` con versión de app y de esquema (migraciones seguras)
 - [x] Decisión documentada: datos junto al .exe (modo portable). Riesgo conocido: si el exe se mueve a `Program Files`, requiere permisos de admin.
 
-## Fase 1 — Autenticación
+## Fase 1 — Autenticación  ✅ COMPLETADA (2026-10-29)
 
-- [ ] Migrar SHA-256 sin salt (`database.py:20`) → `bcrypt` o `argon2-cffi`, con migración transparente al login (detectar hash de 64 hex → verificar → rehashear)
-- [ ] Forzar cambio del password por defecto `superadmin`/`Admin2024!` (`database.py:146`) — flag `debe_cambiar_password`
-- [ ] Lockout tras N intentos fallidos + registrar intentos fallidos y logins en bitácora
-- [ ] Política de contraseñas (longitud/complejidad — `val_pass` hoy solo pide 6 chars)
-- [ ] Cifrar `empresas.correo_password` (`database.py:42`) — hoy en texto plano — o eliminarlo
-- [ ] Auto-bloqueo de sesión por inactividad + re-autenticación en operaciones destructivas (borrar empleado, restaurar backup)
+- [x] Migrar SHA-256 sin salt → **bcrypt**, con migración transparente al login (detecta hash de 64 hex → verifica → rehashea). `database.py: hash_password/verify_password`
+- [x] Forzar cambio del password por defecto `superadmin`/`Admin2024!` — flag `debe_cambiar_password` + modal obligatorio al login (`_forzar_cambio_password`)
+- [x] Lockout: 5 intentos fallidos → bloqueo 15 min (`intentos_fallidos`, `bloqueado_hasta`); intentos, bloqueos y logins quedan en bitácora
+- [x] Política de contraseñas: mínimo 8 chars + letra + número (`politica_password_ok` en BD + `val_pass` en GUI)
+- [x] `empresas.correo_password` cifrado en reposo con **DPAPI** (CryptProtectData, ligado al usuario de Windows — sin llave que gestionar); `cifrar_secreto`/`descifrar_secreto`
+- [x] Auto-logout por inactividad (15 min, `SESION_MINUTOS` en `BaseWin`) + re-autenticación `_reautenticar()` en: eliminación definitiva de empleado, restaurar backup de empresa y restaurar backup completo
 
 ## Fase 2 — Datos en reposo (decisión arquitectónica primero)
 

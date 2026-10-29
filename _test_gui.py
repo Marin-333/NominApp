@@ -16,8 +16,8 @@ db.init_db(); db.migrar_base_datos()
 
 db.crear_empresa("Test SA", "900111", "Calle 1", "3001234", periodo_pago="quincenal")
 EID = db.listar_empresas()[0]["id"]
-db.crear_admin("admin1", "pass123", "Admin Uno", EID)
-adm = db.autenticar("admin1", "pass123")
+db.crear_admin("admin1", "Pass1234", "Admin Uno", EID)
+adm = db.autenticar("admin1", "Pass1234")
 db.crear_empleado(EID, "Juan P", "1001", "Op", 2000000, "2024-01-15")
 db.crear_empleado(EID, "Ana P", "2002", "Cons", 150000, "2024-03-01", None, None, 30, "prestacion", 150000)
 db.crear_prestamo(EID, db.listar_empleados(EID)[0]["id"], 100000, "2026-09-01", "t")

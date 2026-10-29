@@ -327,6 +327,84 @@ check("admin NO lista docs ajenos", _denegado(
     lambda: db.listar_documentos_dian(EID2)))
 db.establecer_sesion(u)
 
+# ── Retención en la fuente (Art. 383 ET) ──────────────────────────────────
+c_hi = db.calcular_nomina(12000000, 30, 0, 0, 0, 0, periodo_pago='mensual',
+                          periodo="2026-09")
+check("retención sueldo alto >0", c_hi["retencion"] > 0,
+      f"ret={c_hi['retencion']}")
+check("retención incluida en deducciones",
+      abs(c_hi["salario_bruto"] - c_hi["salud"] - c_hi["pension"]
+          - c_hi["fsp"] - c_hi["retencion"]
+          - c_hi["salario_neto"]) < 0.01)
+check("sin retención sueldo bajo", c["retencion"] == 0)
+# Gravable 266.67 UVT → menos 25% exento = 200 UVT base → rango (150,360]:
+# (200-150)*0.28*UVT + 10 UVT = 24 UVT
+ret_ref = db.calcular_retencion(db.D(200)*db.D(params["uvt"])/db.D("0.75"),
+                                0, params["uvt"])
+check("tabla retención rango 150-360",
+      abs(float(ret_ref) - 24*params["uvt"]) < 1,
+      f"ret={ret_ref}")
+
+# ── Novedades que afectan el pago ─────────────────────────────────────────
+ok, msg = db.crear_empleado(EID, "Pedro Lic", "4004", "Op", 2100000, "2025-01-01")
+E4 = next(e["id"] for e in db.listar_empleados(EID) if e["documento"] == "4004")
+db.crear_novedad(EID, E4, "licencia_no_remunerada", "2026-11-05", "2026-11-09")
+ok, msg, nid4 = db.guardar_nomina(EID, E4, "2026-11", 30, 0, 0, 0, 0, "", 2100000)
+check("nomina con licencia", ok, msg)
+n4 = db.obtener_nomina(nid4, EID)
+check("licencia resta 5 días", n4["dias_trabajados"] == 25)
+check("obs licencia en nomina", "sin pago" in (n4["observaciones"] or ""))
+
+ok, msg = db.crear_empleado(EID, "Maria Inc", "5005", "Op", 2100000, "2025-01-01")
+E5 = next(e["id"] for e in db.listar_empleados(EID) if e["documento"] == "5005")
+db.crear_novedad(EID, E5, "incapacidad", "2026-11-10", "2026-11-14")
+ok, msg, nid5 = db.guardar_nomina(EID, E5, "2026-11", 30, 0, 0, 0, 0, "", 2100000)
+check("nomina con incapacidad", ok, msg)
+n5 = db.obtener_nomina(nid5, EID)
+# 5 días incapacidad: 2 al 100% + 3 al 66.67% → 29.0001 días equivalentes
+esp_ibc = round(2100000/30*(27 + 3*0.6667), 2)
+check("incapacidad 66.67% desde día 3",
+      abs(n5["ibc"] - esp_ibc) < 1, f"ibc={n5['ibc']} esp={esp_ibc}")
+
+# ── Prestaciones sociales ─────────────────────────────────────────────────
+n_gen, errs = db.generar_prestacion(EID, "prima", "2026-1S")
+check("generar prima semestre", n_gen >= 3 and errs == [],
+      f"n={n_gen} errs={errs}")
+pri = [p for p in db.listar_prestaciones(EID, "prima")
+       if p["empleado_id"] == E1][0]
+# E1: salario 2.1M + aux 249.095 → base 2.349.095 × 180/360
+check("valor prima = base×180/360",
+      abs(pri["valor"] - (2100000 + params["aux_transporte"])*180/360) < 1,
+      f"prima={pri['valor']}")
+n_gen, _ = db.generar_prestacion(EID, "cesantias", "2026")
+ces = [p for p in db.listar_prestaciones(EID, "cesantias")
+       if p["empleado_id"] == E1][0]
+check("cesantías año completo",
+      abs(ces["valor"] - (2100000 + params["aux_transporte"])) < 1)
+n_gen, _ = db.generar_prestacion(EID, "intereses_cesantias", "2026")
+int_c = [p for p in db.listar_prestaciones(EID, "intereses_cesantias")
+         if p["empleado_id"] == E1][0]
+check("intereses 12% sobre cesantías",
+      abs(int_c["valor"] - ces["valor"]*0.12) < 1,
+      f"int={int_c['valor']}")
+n_gen, _ = db.generar_prestacion(EID, "vacaciones", "2026-12")
+vac = [p for p in db.listar_prestaciones(EID, "vacaciones")
+       if p["empleado_id"] == E1][0]
+check("vacaciones salario/2",
+      abs(vac["valor"] - 2100000/2) < 1, f"vac={vac['valor']}")
+ok, msg = db.marcar_prestacion_pagada(pri["id"])
+check("marcar prestación pagada",
+      ok and next(p for p in db.listar_prestaciones(EID)
+                  if p["id"] == pri["id"])["estado"] == "pagada")
+db.establecer_sesion(adm)
+check("admin NO genera prestación ajena", _denegado(
+    lambda: db.generar_prestacion(EID2, "prima", "2026-1S")))
+check("admin NO lista prestaciones ajenas", _denegado(
+    lambda: db.listar_prestaciones(EID2)))
+db.establecer_sesion(u)
+ok, msg = db.eliminar_prestacion(vac["id"])
+check("eliminar prestación", ok)
+
 # Contratos
 ok, msg = db.crear_contrato(EID, E2, "Contrato obra", 5000000, "2026-09-01", "2026-12-31", 100000, "obs")
 check("crear_contrato", ok, msg)

@@ -1154,6 +1154,7 @@ class AdminWin(BaseWin):
              ("emps",    "👤  Empleados",         self._s_emps),
              ("prestamos","💳  Préstamos",        self._s_prestamos),
              ("novedades","📅  Novedades",        self._s_novedades),
+             ("prestaciones","🏖️  Prestaciones",   self._s_prestaciones),
              ("contratos","📋  Contratos",        self._s_contratos),
              ("nomina",  "💰  Nómina",           self._s_nomina),
              ("colilla", "🧾  Colillas de Pago",  self._s_colilla),
@@ -2318,6 +2319,80 @@ class AdminWin(BaseWin):
             os.startfile(d)
         except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
 
+    # ═══ PRESTACIONES SOCIALES ═══════════════════════════════════════════════
+    def _s_prestaciones(self):
+        self._clr()
+        self._hdr("🏖️  Prestaciones Sociales")
+        self._sub("Prima (jun/dic), cesantías (dic/feb), intereses de cesantías "
+                  "(ene) y vacaciones. Se calculan con los parámetros del período "
+                  "y se incluyen en el documento DIAN del mes de pago.")
+
+        fr = tk.Frame(self.ct, bg=C["bg"]); fr.pack(padx=24, anchor="w", pady=(4,10))
+        tk.Label(fr, text="Generar:", font=F["h4"], bg=C["bg"], fg=C["sub"]
+            ).pack(side="left", padx=(0,10))
+        Btn(fr,"Prima",cmd=lambda:self._gen_prest("prima"),sty="out",icon="💵").pack(side="left",padx=(0,8))
+        Btn(fr,"Cesantías",cmd=lambda:self._gen_prest("cesantias"),sty="out",icon="🏦").pack(side="left",padx=(0,8))
+        Btn(fr,"Intereses cesantías",cmd=lambda:self._gen_prest("intereses_cesantias"),sty="out",icon="📈").pack(side="left",padx=(0,8))
+        Btn(fr,"Vacaciones",cmd=lambda:self._gen_prest("vacaciones"),sty="out",icon="🌴").pack(side="left",padx=(0,8))
+
+        self.tv_prest = self._tree(
+            ("id","empleado","tipo","periodo","base","dias","valor","estado"),
+            [("ID",35),("Empleado",190),("Tipo",160),("Período",90),
+             ("Base",100),("Días",50),("Valor",110),("Estado",90)])
+        fr2 = tk.Frame(self.ct, bg=C["bg"]); fr2.pack(padx=24, anchor="w", pady=(4,18))
+        Btn(fr2,"Marcar pagada",cmd=self._pagar_prest,sty="ok",icon="✅").pack(side="left",padx=(0,8))
+        Btn(fr2,"Eliminar",cmd=self._del_prest,sty="err",icon="🗑").pack(side="left",padx=(0,8))
+        self._load_prestaciones()
+
+    def _load_prestaciones(self):
+        self.tv_prest.delete(*self.tv_prest.get_children())
+        try:
+            for i,p in enumerate(db.listar_prestaciones(self.eid)):
+                self.tv_prest.insert("","end",iid=str(p["id"]),
+                    values=(p["id"],p.get("empleado_nombre",""),
+                            db.TIPOS_PRESTACION.get(p["tipo"],p["tipo"]),
+                            p["periodo"],fmt(p["base"]),p["dias"],
+                            fmt(p["valor"]),
+                            "✅ Pagada" if p.get("estado")=="pagada" else "Calculada"),
+                    tags=self._tag(i))
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _gen_prest(self, tipo):
+        from tkinter import simpledialog
+        hints = {"prima": "Semestre: 2026-1S o 2026-2S",
+                 "cesantias": "Año: 2026",
+                 "intereses_cesantias": "Año: 2026",
+                 "vacaciones": "Mes de pago: 2026-12"}
+        per = simpledialog.askstring("Generar prestación",
+            f"{db.TIPOS_PRESTACION[tipo]}\n\nPeríodo ({hints[tipo]}):",
+            parent=self)
+        if not per: return
+        try:
+            n, errs = db.generar_prestacion(self.eid, tipo, per.strip())
+        except Exception as ex:
+            messagebox.showerror("Error",str(ex),parent=self); return
+        msg = f"Se calcularon {n} registro(s)."
+        if errs: msg += "\n\nErrores:\n" + "\n".join(errs[:6])
+        messagebox.showinfo("Prestaciones", msg, parent=self)
+        self._load_prestaciones()
+
+    def _pagar_prest(self):
+        pid = self._sel(self.tv_prest, "prestación")
+        if pid is None: return
+        try:
+            ok,msg = db.marcar_prestacion_pagada(pid)
+            if ok: self._load_prestaciones()
+            else: messagebox.showerror("Error",msg,parent=self)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _del_prest(self):
+        pid = self._sel(self.tv_prest, "prestación")
+        if pid is None: return
+        if not messagebox.askyesno("Confirmar eliminación",
+            "¿Eliminar este registro de prestación?",parent=self): return
+        try: db.eliminar_prestacion(pid); self._load_prestaciones()
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
     # ═══ CONTRATOS ════════════════════════════════════════════════════════════
     def _s_contratos(self):
         self._clr()
@@ -2942,7 +3017,7 @@ class AdminWin(BaseWin):
         pv_frame=tk.Frame(win,bg=C["card"]); pv_frame.pack(padx=24,fill="x",pady=(10,4))
         pv_labels={}
         for key,lab in [("bruto","Bruto"),("aux","Aux. transporte"),("salud","Salud"),
-                        ("pension","Pensión"),("fsp","FSP"),
+                        ("pension","Pensión"),("fsp","FSP"),("ret","Retención"),
                         ("prest","Préstamo"),("deds","Otras Deds"),("neto","NETO")]:
             r=tk.Frame(pv_frame,bg=C["card"]); r.pack(fill="x",pady=1)
             tk.Label(r,text=lab,font=F["bd"],bg=C["card"],fg=C["sub"],width=14,anchor="w").pack(side="left")
@@ -2967,6 +3042,7 @@ class AdminWin(BaseWin):
                 pv_labels["salud"].config(text=f"−{fmt(c['salud'])}" if c['salud']>0 else "$ 0")
                 pv_labels["pension"].config(text=f"−{fmt(c['pension'])}" if c['pension']>0 else "$ 0")
                 pv_labels["fsp"].config(text=f"−{fmt(c['fsp'])}" if c['fsp']>0 else "$ 0")
+                pv_labels["ret"].config(text=f"−{fmt(c['retencion'])}" if c.get('retencion',0)>0 else "$ 0")
                 pv_labels["prest"].config(text=f"−{fmt(c['prestamo'])}" if c['prestamo']>0 else "$ 0")
                 pv_labels["deds"].config(text=f"−{fmt(float(e_ded.get() or 0))}" if float(e_ded.get() or 0)>0 else "$ 0")
                 pv_labels["neto"].config(text=fmt(c["salario_neto"]))

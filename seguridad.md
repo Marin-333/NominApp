@@ -54,8 +54,9 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [x] Columnas nuevas en `nominas`: `fsp`, `ibc`; `auxilio_transporte` (ya existía) ahora se persiste
 - [x] Tabla `novedades` (incapacidad, licencias maternidad/paternidad/no remunerada, vacaciones, suspensión, ingreso/retiro, variación salarial, otra) con `TIPOS_NOVEDAD` alineados a conceptos DIAN + CRUD con scope de empresa + sección "📅 Novedades" en GUI
 - [x] Colilla PDF actualizada: auxilio de transporte en devengados, FSP en deducciones, salud/pensión etiquetados "% del IBC"
-- [ ] Retención en la fuente y prestaciones sociales (prima, cesantías, intereses) — pendiente
-- [ ] Novedades aún no descuentan días automáticamente del cálculo de nómina (son registro informativo — el cálculo del efecto en pago queda para la integración DIAN)
+- [x] Retención en la fuente (Art. 383 ET): tabla UVT completa con rangos y tarifa marginal, base = gravable − deducciones obligatorias − 25% exento (tope 240 UVT), proyectada a mensual y prorrateada en quincena; columna `retencion` en `nominas`, fila en la colilla PDF y elemento `RetencionFuente` en el XML
+- [x] Prestaciones sociales: tabla `prestaciones` + `generar_prestacion` masivo con `calcular_prestacion` (prima/cesantías = (salario+aux)×días/360, intereses = cesantías×12%×días/360, vacaciones = salario×días/720); base con parámetros del año devengado; sección "🏖️ Prestaciones" en GUI (generar, marcar pagada, eliminar) y conceptos `Primas`/`Cesantias`/`Vacaciones` en el XML del mes de pago
+- [x] Novedades con efecto en el pago: `licencia_no_remunerada`/`suspension` restan días trabajados; `incapacidad` paga los 2 primeros días del mes al 100% y el resto al 66.67%; los ajustes quedan anotados en `nominas.observaciones` y se emiten en la sección `<Novedades>` del XML
 
 ## Fase 5 — DIAN (nómina electrónica) ✅ (fundación — sin transmisión real)
 

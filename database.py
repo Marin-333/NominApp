@@ -535,6 +535,21 @@ def init_db():
             creado_en       TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS prestaciones (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id      INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+            empleado_id     INTEGER NOT NULL REFERENCES empleados(id),
+            tipo            TEXT NOT NULL,
+            periodo         TEXT NOT NULL,
+            base            REAL NOT NULL,
+            dias            INTEGER NOT NULL,
+            valor           REAL NOT NULL,
+            estado          TEXT DEFAULT 'calculada'
+                            CHECK(estado IN ('calculada','pagada')),
+            creado_en       TEXT DEFAULT (datetime('now')),
+            UNIQUE(empresa_id, empleado_id, tipo, periodo)
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             clave   TEXT PRIMARY KEY,
             valor   TEXT
@@ -697,10 +712,11 @@ def migrar_base_datos():
     except sqlite3.OperationalError:
         pass
 
-    # Nominación exacta: FSP e IBC (auxilio_transporte ya existe desde antes)
+    # Nominación exacta: FSP, IBC y retención en la fuente
     for ddl in (
         "ALTER TABLE nominas ADD COLUMN fsp REAL NOT NULL DEFAULT 0",
         "ALTER TABLE nominas ADD COLUMN ibc REAL",
+        "ALTER TABLE nominas ADD COLUMN retencion REAL NOT NULL DEFAULT 0",
     ):
         try:
             c.execute(ddl)
@@ -1230,22 +1246,33 @@ def eliminar_empleado_definitivo(emp_id, empresa_id, eliminar_nominas=False):
             "SELECT COUNT(*) FROM documentos_dian WHERE empleado_id=? AND empresa_id=?",
             (emp_id, empresa_id)
         ).fetchone()[0]
+        prest_count = conn.execute(
+            "SELECT COUNT(*) FROM prestaciones WHERE empleado_id=? AND empresa_id=?",
+            (emp_id, empresa_id)
+        ).fetchone()[0]
 
-        if (nominas_count > 0 or docs_count > 0) and not eliminar_nominas:
+        if (nominas_count > 0 or docs_count > 0 or prest_count > 0) \
+                and not eliminar_nominas:
             detalle = f"{nominas_count} nómina(s)"
             if docs_count:
                 detalle += f" y {docs_count} documento(s) DIAN"
+            if prest_count:
+                detalle += f" y {prest_count} prestación(es)"
             return False, (f"El empleado tiene {detalle}. Debe decidir qué hacer "
                            "con estos registros.")
 
-        # Eliminar registros de nómina (y documentos DIAN, que referencian al
-        # empleado por FK) si se solicita — los XML quedan en disco
+        # Eliminar registros de nómina (y documentos/prestaciones, que
+        # referencian al empleado por FK) si se solicita — XML queda en disco
         if eliminar_nominas:
             conn.execute("DELETE FROM nominas WHERE empleado_id=? AND empresa_id=?",
                          (emp_id, empresa_id))
             if docs_count:
                 conn.execute(
                     "DELETE FROM documentos_dian WHERE empleado_id=? AND empresa_id=?",
+                    (emp_id, empresa_id))
+            if prest_count:
+                conn.execute(
+                    "DELETE FROM prestaciones WHERE empleado_id=? AND empresa_id=?",
                     (emp_id, empresa_id))
         
         # Eliminar al empleado
@@ -1313,22 +1340,34 @@ def guardar_nomina(empresa_id, empleado_id, periodo, dias_trabajados, horas_extr
         if existente:
             return False, f"Ya existe una nómina para este empleado en el período {periodo}.", existente["id"]
 
-        calc = calcular_nomina(salario_base, dias_trabajados, horas_extras,
+        # Efecto de novedades del período: licencias/suspensiones quitan días,
+        # incapacidad se paga al 66.67% desde el día 3 del mes
+        aj = ajuste_novedades(empresa_id, empleado_id, periodo, quincena)
+        dias_efectivos = max(0, int(dias_trabajados) - aj["dias_no_pago"])
+        obs_auto = observaciones or ""
+        if aj["dias_no_pago"]:
+            obs_auto += f" | {aj['dias_no_pago']}d sin pago (licencia/suspensión)"
+        if aj["dias_incapacidad"] or aj["dias_incap_100"]:
+            obs_auto += (f" | incapacidad {aj['dias_incap_100']}d al 100% "
+                         f"+ {aj['dias_incapacidad']}d al 66.67%")
+
+        calc = calcular_nomina(salario_base, dias_efectivos, horas_extras,
                                valor_hora_extra, bonificaciones, deducciones,
                                periodo_pago=periodo_pago, quincena=quincena,
-                               prestamo=prestamo, periodo=periodo)
+                               prestamo=prestamo, periodo=periodo,
+                               dias_incapacidad=aj["dias_incapacidad"])
         conn.execute("""
             INSERT INTO nominas (empresa_id, empleado_id, periodo, quincena, dias_trabajados,
                 horas_extras, valor_hora_extra, bonificaciones, deducciones,
-                salud, pension, fsp, ibc, auxilio_transporte, prestamo,
+                salud, pension, fsp, retencion, ibc, auxilio_transporte, prestamo,
                 salario_base, salario_bruto, salario_neto, observaciones)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            empresa_id, empleado_id, periodo, quincena, dias_trabajados,
+            empresa_id, empleado_id, periodo, quincena, dias_efectivos,
             horas_extras, pesos(valor_hora_extra), pesos(bonificaciones), pesos(deducciones),
-            calc["salud"], calc["pension"], calc["fsp"], calc["ibc"],
+            calc["salud"], calc["pension"], calc["fsp"], calc["retencion"], calc["ibc"],
             calc["aux_transporte"], calc["prestamo"], pesos(salario_base),
-            calc["salario_bruto"], calc["salario_neto"], observaciones
+            calc["salario_bruto"], calc["salario_neto"], obs_auto.strip()
         ))
         conn.commit()
         nomina_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -1908,6 +1947,14 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
                 fecha_respuesta TEXT, respuesta TEXT, doc_origen_id INTEGER,
                 creado_en TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS prestaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa_id INTEGER NOT NULL, empleado_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL, periodo TEXT NOT NULL,
+                base REAL NOT NULL, dias INTEGER NOT NULL, valor REAL NOT NULL,
+                estado TEXT DEFAULT 'calculada',
+                creado_en TEXT DEFAULT (datetime('now'))
+            );
             CREATE TABLE IF NOT EXISTS prestamos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 empresa_id INTEGER NOT NULL, empleado_id INTEGER NOT NULL,
@@ -1981,6 +2028,7 @@ def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
         _copy_table("novedades", "empresa_id", empresa_id)
         _copy_table("config_dian", "empresa_id", empresa_id)
         _copy_table("documentos_dian", "empresa_id", empresa_id)
+        _copy_table("prestaciones", "empresa_id", empresa_id)
 
         conn_dst.commit()
         conn_dst.close()
@@ -2053,7 +2101,7 @@ def importar_backup_empresa(empresa_id, ruta_origen, password=None):
         # Borrar datos actuales de la empresa (documentos/novedades antes que
         # empleados por las FK)
         for tbl in ("bitacora","documentos_dian","novedades","config_dian",
-                    "prestamos","contratos","nominas","empleados"):
+                    "prestaciones","prestamos","contratos","nominas","empleados"):
             try:
                 conn_dst.execute(f"DELETE FROM {tbl} WHERE empresa_id=?", (empresa_id,))
             except Exception:
@@ -2158,6 +2206,14 @@ def importar_backup_empresa(empresa_id, ruta_origen, password=None):
             new_id = _insert("documentos_dian", row)
             if old_id is not None and new_id is not None:
                 doc_map[old_id] = new_id
+
+        for row in _get_rows(conn_src, "prestaciones", "empresa_id", empresa_id):
+            row.pop("id", None)
+            row["empresa_id"] = empresa_id
+            row["empleado_id"] = emp_map.get(row.get("empleado_id"))
+            if row["empleado_id"] is None:
+                continue
+            _insert("prestaciones", row)
 
         conn_dst.commit()
         conn_src.close(); conn_dst.close()
@@ -2367,6 +2423,165 @@ def eliminar_novedad(novedad_id):
     return True, "Novedad eliminada."
 
 
+# ─── PRESTACIONES SOCIALES (Fase 4) ──────────────────────────────────────────
+
+TIPOS_PRESTACION = {
+    "prima":               "Prima de servicios (semestral)",
+    "cesantias":           "Cesantías (anuales)",
+    "intereses_cesantias": "Intereses de cesantías (12% anual)",
+    "vacaciones":          "Vacaciones (15 días hábiles por año)",
+}
+
+
+def _dias_vigencia_360(emp, inicio, fin):
+    """Días trabajados entre inicio y fin (base 360), recortando por
+    fecha_ingreso/fecha_retiro del empleado."""
+    try:
+        ini = max(inicio,
+                  datetime.strptime(str(emp.get("fecha_ingreso") or "")[:10],
+                                    "%Y-%m-%d").date()
+                  if emp.get("fecha_ingreso") else inicio)
+    except ValueError:
+        ini = inicio
+    try:
+        ret = datetime.strptime(str(emp.get("fecha_retiro") or "")[:10],
+                                "%Y-%m-%d").date() \
+            if emp.get("fecha_retiro") else fin
+    except ValueError:
+        ret = fin
+    fin_e = min(fin, ret)
+    return max(0, min((fin_e - ini).days + 1, 360))
+
+
+def calcular_prestacion(tipo, salario, aux_transporte, dias):
+    """Valor de la prestación social (Decimal exacto):
+    - prima/cesantías: (salario + aux. transporte) × días / 360
+    - intereses cesantías: cesantías × 12% × días / 360
+    - vacaciones: salario × días / 720"""
+    sb, aux, d = D(salario), D(aux_transporte), D(dias)
+    if tipo in ("prima", "cesantias"):
+        return pesos((sb + aux) * d / 360)
+    if tipo == "intereses_cesantias":
+        return pesos(((sb + aux) * d / 360) * Decimal("0.12") * d / 360)
+    if tipo == "vacaciones":
+        return pesos(sb * d / 720)
+    raise ValueError(f"Tipo de prestación inválido: {tipo}")
+
+
+def rango_prestacion(tipo, periodo):
+    """(inicio, fin) de vigencia según el período pedido:
+    - prima:      '2026-1S' → ene-jun, '2026-2S' → jul-dic
+    - cesantías/intereses: '2026' → año completo
+    - vacaciones: 'YYYY-MM' → 12 meses terminando ese mes"""
+    if tipo == "prima":
+        y = int(periodo[:4]); sem = periodo[-2:]
+        return ((datetime(y, 1, 1).date(), datetime(y, 6, 30).date())
+                if sem == "1S" else
+                (datetime(y, 7, 1).date(), datetime(y, 12, 31).date()))
+    if tipo in ("cesantias", "intereses_cesantias"):
+        y = int(periodo[:4])
+        return datetime(y, 1, 1).date(), datetime(y, 12, 31).date()
+    if tipo == "vacaciones":
+        y, m = int(periodo[:4]), int(periodo[5:7])
+        fin = (datetime(y + (m == 12), (m % 12) + 1, 1)
+               - timedelta(days=1)).date()
+        return fin - timedelta(days=359), fin
+    raise ValueError(periodo)
+
+
+def periodo_pago_prestacion(tipo, periodo):
+    """Mes de pago de la prestación → 'YYYY-MM' (donde cae en el XML)."""
+    y = int(periodo[:4])
+    if tipo == "prima":
+        return f"{y}-06" if periodo.endswith("1S") else f"{y}-12"
+    if tipo == "cesantias":
+        return f"{y}-12"          # pago con nómina de diciembre
+    if tipo == "intereses_cesantias":
+        return f"{y + 1}-01"      # se paga antes del 31 de enero
+    return periodo                # vacaciones: mes del pago
+
+
+def generar_prestacion(empresa_id, tipo, periodo, solo_activos=True):
+    """Calcula y registra la prestación para todos los empleados de
+    salario fijo. Devuelve (generados, errores)."""
+    _verificar_scope_empresa(empresa_id)
+    if tipo not in TIPOS_PRESTACION:
+        return 0, [f"Tipo inválido: {tipo}"]
+    ini, fin = rango_prestacion(tipo, periodo)
+    per_pago = periodo_pago_prestacion(tipo, periodo)
+    # La base (SMMLV/aux) es la del año DEVENGADO, no la del pago
+    params = parametros_vigentes(f"{str(periodo)[:4]}-06")
+    conn = get_connection()
+    emps = conn.execute(
+        "SELECT * FROM empleados WHERE empresa_id=? AND tipo_vinculacion='salario'"
+        + (" AND activo=1" if solo_activos else ""),
+        (empresa_id,)).fetchall()
+    gen, errs = 0, []
+    for e in emps:
+        e = dict(e)
+        dias = _dias_vigencia_360(e, ini, fin)
+        if tipo == "prima":
+            dias = min(dias, 180)      # semestre = 180 días base 360
+        if dias <= 0:
+            continue
+        sb = D(e["salario"] or 0)
+        aux = (params["aux_transporte"]
+               if sb <= D(params["smmlv"]) * 2 else 0)
+        valor = calcular_prestacion(tipo, sb, aux, dias)
+        try:
+            conn.execute("""
+                INSERT INTO prestaciones (empresa_id, empleado_id, tipo,
+                    periodo, base, dias, valor)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(empresa_id, empleado_id, tipo, periodo)
+                DO UPDATE SET base=excluded.base, dias=excluded.dias,
+                              valor=excluded.valor
+            """, (empresa_id, e["id"], tipo, per_pago,
+                  pesos(sb + D(aux)), dias, valor))
+            gen += 1
+        except Exception as ex:
+            errs.append(f"{e.get('nombre','?')}: {ex}")
+    conn.commit()
+    conn.close()
+    return gen, errs
+
+
+def listar_prestaciones(empresa_id, tipo=None, periodo=None):
+    _verificar_scope_empresa(empresa_id)
+    fil = ["p.empresa_id=?"]; params = [empresa_id]
+    if tipo:
+        fil.append("p.tipo=?"); params.append(tipo)
+    if periodo:
+        fil.append("p.periodo=?"); params.append(periodo)
+    conn = get_connection()
+    rows = conn.execute(f"""
+        SELECT p.*, e.nombre as empleado_nombre, e.documento
+        FROM prestaciones p JOIN empleados e ON p.empleado_id=e.id
+        WHERE {' AND '.join(fil)} ORDER BY p.periodo DESC, e.nombre
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def marcar_prestacion_pagada(prestacion_id):
+    conn = get_connection()
+    _verificar_scope_registro(conn, "prestaciones", prestacion_id)
+    conn.execute("UPDATE prestaciones SET estado='pagada' WHERE id=?",
+                 (prestacion_id,))
+    conn.commit()
+    conn.close()
+    return True, "Prestación marcada como pagada."
+
+
+def eliminar_prestacion(prestacion_id):
+    conn = get_connection()
+    _verificar_scope_registro(conn, "prestaciones", prestacion_id)
+    conn.execute("DELETE FROM prestaciones WHERE id=?", (prestacion_id,))
+    conn.commit()
+    conn.close()
+    return True, "Prestación eliminada."
+
+
 # ─── DIAN — NÓMINA ELECTRÓNICA (Fase 5) ──────────────────────────────────────
 # Base de datos y generación del Documento Soporte de Pago de Nómina
 # Electrónica (Resolución 000013 de 2021 + Anexo Técnico). La estructura XML
@@ -2533,7 +2748,7 @@ def _sub_el(parent, tag, val):
 
 
 def _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo, periodo,
-                   ambiente, cune, cfg, nota=None):
+                   ambiente, cune, cfg, nota=None, novs=None):
     """Arma el XML NominaIndividual del anexo (un documento por trabajador
     por mes, con los acumulados de todas las nóminas del período)."""
     ahora = datetime.now()
@@ -2631,6 +2846,22 @@ def _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo, periodo,
         bons = ET.SubElement(dev, "Bonificaciones")
         _sub_el(bons, "BonificacionS", "0.00")
         _sub_el(bons, "BonificacionNS", _fmt2(tot["bon"]))
+    if D(tot.get("prima") or 0) > 0:
+        pr = ET.SubElement(dev, "Primas")
+        _sub_el(pr, "Cantidad", "1")
+        _sub_el(pr, "PagoS", _fmt2(tot["prima"]))
+        _sub_el(pr, "PagoNS", "0.00")
+    if D(tot.get("cesantias") or 0) > 0 or D(tot.get("intereses") or 0) > 0:
+        ces = ET.SubElement(dev, "Cesantias")
+        _sub_el(ces, "Pago", _fmt2(tot.get("cesantias")))
+        _sub_el(ces, "Porcentaje", "100.00")
+        _sub_el(ces, "PagoIntereses", _fmt2(tot.get("intereses")))
+    if D(tot.get("vacaciones") or 0) > 0:
+        vac = ET.SubElement(dev, "Vacaciones")
+        vc = ET.SubElement(vac, "VacacionesComunes")
+        _sub_el(vc, "FechaInicio", f"{periodo}-01")
+        _sub_el(vc, "Cantidad", "15")
+        _sub_el(vc, "Pago", _fmt2(tot["vacaciones"]))
 
     ded = ET.SubElement(root, "DeduccionesXML")
     sal_el = ET.SubElement(ded, "Salud")
@@ -2646,9 +2877,29 @@ def _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo, periodo,
         lib = ET.SubElement(ded, "Libranzas")
         _sub_el(lib, "Deduccion", _fmt2(tot["prest"]))
         _sub_el(lib, "Descripcion", "Préstamo interno")
+    if D(tot.get("retencion") or 0) > 0:
+        _sub_el(ded, "RetencionFuente", _fmt2(tot["retencion"]))
     if D(tot["ded"] or 0) > 0:
         od = ET.SubElement(ded, "OtrasDeducciones")
         _sub_el(od, "OtraDeduccion", _fmt2(tot["ded"]))
+
+    _nov_el_tag = {
+        "ingreso": "Ingreso", "retiro": "Retiro",
+        "vacaciones": "Vacaciones", "incapacidad": "Incapacidades",
+        "licencia_maternidad": "Licencias",
+        "licencia_paternidad": "Licencias",
+        "licencia_no_remunerada": "LicenciaNoRemunerada",
+        "suspension": "Suspension", "variacion_salarial": "VSP",
+        "otra": "OtraNovedad",
+    }
+    if novs:
+        nv = ET.SubElement(root, "Novedades")
+        for n in novs:
+            tag = _nov_el_tag.get(n["tipo"], "OtraNovedad")
+            nel = ET.SubElement(nv, tag)
+            _sub_el(nel, "FechaInicio", n.get("fecha_inicio"))
+            _sub_el(nel, "FechaFin", n.get("fecha_fin"))
+            _sub_el(nel, "Pago", _fmt2(n["valor"]) if n.get("valor") else None)
 
     _sub_el(root, "DevengadosTotal", _fmt2(tot["bruto"]))
     _sub_el(root, "DeduccionesTotal", _fmt2(tot["deducciones_total"]))
@@ -2670,6 +2921,7 @@ def _totales_periodo(conn, empresa_id, empleado_id, periodo):
                SUM(horas_extras*valor_hora_extra) pago_extras,
                SUM(bonificaciones) bon, SUM(deducciones) ded,
                SUM(salud) salud, SUM(pension) pension, SUM(fsp) fsp,
+               COALESCE(SUM(retencion),0) retencion,
                SUM(prestamo) prest, SUM(auxilio_transporte) aux,
                SUM(salario_bruto) bruto, SUM(salario_neto) neto,
                COALESCE(SUM(ibc),0) ibc, MAX(salario_base) sb
@@ -2679,16 +2931,45 @@ def _totales_periodo(conn, empresa_id, empleado_id, periodo):
     if not row or row["dias"] is None:
         return None
     t = dict(row)
-    # El básico devengado = bruto − aux − extras − bonificaciones
+    # Prestaciones que se pagan en este período (primas, cesantías, vacaciones)
+    pres = conn.execute("""
+        SELECT tipo, SUM(valor) v FROM prestaciones
+        WHERE empresa_id=? AND empleado_id=? AND periodo=?
+        GROUP BY tipo
+    """, (empresa_id, empleado_id, periodo)).fetchall()
+    pres_d = {r["tipo"]: D(r["v"] or 0) for r in pres}
+    t.update({"prima": pres_d.get("prima", Decimal("0")),
+              "cesantias": pres_d.get("cesantias", Decimal("0")),
+              "intereses": pres_d.get("intereses_cesantias", Decimal("0")),
+              "vacaciones": pres_d.get("vacaciones", Decimal("0"))})
+    total_pres = sum(pres_d.values(), Decimal("0"))
+    t["bruto"] = D(t["bruto"] or 0) + total_pres
+    t["neto"] = D(t["neto"] or 0) + total_pres
+    # El básico devengado = bruto − aux − extras − bonificaciones − prestaciones
     t["basico"] = (D(t["bruto"] or 0) - D(t["aux"] or 0)
-                   - D(t["pago_extras"] or 0) - D(t["bon"] or 0))
+                   - D(t["pago_extras"] or 0) - D(t["bon"] or 0)
+                   - total_pres)
     t["deducciones_total"] = (D(t["salud"] or 0) + D(t["pension"] or 0)
-                              + D(t["fsp"] or 0) + D(t["ded"] or 0)
+                              + D(t["fsp"] or 0) + D(t["retencion"] or 0)
+                              + D(t["ded"] or 0)
                               + D(t["prest"] or 0))
     p = parametros_vigentes(periodo)
     t["pct_salud"] = p["pct_salud"]; t["pct_pension"] = p["pct_pension"]
     t["pct_fsp"] = p["pct_fsp"]
     return t
+
+
+def novedades_periodo_dian(empresa_id, empleado_id, periodo):
+    """Novedades del período para la sección <Novedades> del XML DIAN."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT tipo, fecha_inicio, fecha_fin, valor FROM novedades
+        WHERE empresa_id=? AND empleado_id=? AND estado='activa'
+          AND substr(fecha_inicio,1,7)<=?
+          AND substr(COALESCE(fecha_fin,fecha_inicio),1,7)>=?
+    """, (empresa_id, empleado_id, periodo, periodo)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def generar_documento_dian(empresa_id, empleado_id, periodo, regenerar=False):
@@ -2738,8 +3019,9 @@ def generar_documento_dian(empresa_id, empleado_id, periodo, regenerar=False):
             empresa.get("nit"), emp.get("documento"),
             cfg.get("software_pin"), ambiente)
 
+        novs = novedades_periodo_dian(empresa_id, empleado_id, periodo)
         xml = _xml_documento(empresa, emp, tot, numero, prefijo, consecutivo,
-                             periodo, ambiente, cune, cfg)
+                             periodo, ambiente, cune, cfg, novs=novs)
         xml_path = os.path.join(_dian_dir(empresa_id),
                                 f"{numero}_{emp.get('documento','doc')}.xml")
         with open(xml_path, "w", encoding="utf-8") as f:
@@ -2988,10 +3270,106 @@ def _actualizar_cuota_prestamo(conn, empresa_id, empleado_id, monto_desc):
         restante -= abono
 
 
+# Tabla de retención en la fuente por salarios (Art. 383 ET), en UVT:
+# (desde_uvt, hasta_uvt, tarifa_marginal, impuesto_base_uvt)
+TABLA_RETENCION_UVT = [
+    (0,    95,   Decimal("0"),    Decimal("0")),
+    (95,   150,  Decimal("0.19"), Decimal("0")),
+    (150,  360,  Decimal("0.28"), Decimal("10")),
+    (360,  640,  Decimal("0.33"), Decimal("69")),
+    (640,  945,  Decimal("0.35"), Decimal("162")),
+    (945,  2300, Decimal("0.37"), Decimal("268")),
+    (2300, None, Decimal("0.39"), Decimal("770")),
+]
+RETENCION_EXENTA_PCT = Decimal("0.25")   # 25% del ingreso gravable exento
+RETENCION_EXENTA_TOPE_UVT = Decimal("240")
+PCT_INCAPACIDAD = Decimal("0.6667")      # EPS paga 66.67% desde el día 3
+
+
+def calcular_retencion(ingreso_gravable, deducciones_obligatorias, uvt):
+    """Retención en la fuente mensual (procedimiento 1, Art. 383 ET):
+    base = gravable − deducciones − 25% exento (tope 240 UVT) → tabla UVT."""
+    u = D(uvt)
+    if u <= 0:
+        return Decimal("0")
+    gravable = D(ingreso_gravable) - D(deducciones_obligatorias)
+    if gravable <= 0:
+        return Decimal("0")
+    exento = min(gravable * RETENCION_EXENTA_PCT,
+                 RETENCION_EXENTA_TOPE_UVT * u)
+    base_uvt = (gravable - exento) / u
+    for desde, hasta, tarifa, imp_base in TABLA_RETENCION_UVT:
+        if base_uvt > desde and (hasta is None or base_uvt <= hasta):
+            return (base_uvt - D(desde)) * tarifa * u + imp_base * u
+    return Decimal("0")
+
+
+def _dias_solape_periodo(fecha_ini, fecha_fin, periodo, quincena=0):
+    """Días del rango [fecha_ini, fecha_fin] que caen dentro del período
+    'YYYY-MM' (y de la quincena indicada si aplica)."""
+    y, m = int(periodo[:4]), int(periodo[5:7])
+    mes_ini = datetime(y, m, 1).date()
+    if m == 12:
+        mes_fin = datetime(y, 12, 31).date()
+    else:
+        mes_fin = (datetime(y, m + 1, 1) - timedelta(days=1)).date()
+    if quincena == 1:
+        mes_fin = datetime(y, m, 15).date()
+    elif quincena == 2:
+        mes_ini = datetime(y, m, 16).date()
+    try:
+        ini = datetime.strptime(str(fecha_ini)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return 0
+    try:
+        fin = datetime.strptime(str(fecha_fin)[:10], "%Y-%m-%d").date() \
+            if fecha_fin else mes_fin
+    except (ValueError, TypeError):
+        fin = mes_fin
+    ini, fin = max(ini, mes_ini), min(fin, mes_fin)
+    return max(0, (fin - ini).days + 1)
+
+
+def ajuste_novedades(empresa_id, empleado_id, periodo, quincena=0):
+    """Efecto de las novedades activas del período en el pago:
+    - licencia_no_remunerada / suspension → días sin pago (se restan).
+    - incapacidad → se pagan los 2 primeros días del mes al 100%, el resto
+      al 66.67% (aportes de la EPS)."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT tipo, fecha_inicio, fecha_fin FROM novedades
+        WHERE empresa_id=? AND empleado_id=? AND estado='activa'
+          AND substr(fecha_inicio,1,7)<=? AND substr(COALESCE(fecha_fin,fecha_inicio),1,7)>=?
+    """, (empresa_id, empleado_id, periodo, periodo)).fetchall()
+    dias_no_pago = dias_incap_mes = 0
+    for r in rows:
+        d = _dias_solape_periodo(r["fecha_inicio"], r["fecha_fin"],
+                               periodo, quincena)
+        d_mes = _dias_solape_periodo(r["fecha_inicio"], r["fecha_fin"], periodo, 0)
+        if r["tipo"] in ("licencia_no_remunerada", "suspension"):
+            dias_no_pago += d
+        elif r["tipo"] == "incapacidad":
+            dias_incap_mes += d_mes
+    conn.close()
+    # Incapacidad: los 2 primeros días del mes al 100%, el resto al 66.67%
+    if quincena == 1:
+        prev = 0; en_q = min(dias_incap_mes, 15)
+    elif quincena == 2:
+        en_q = max(0, dias_incap_mes - 15)
+        prev = min(dias_incap_mes, 15)
+    else:
+        prev = 0; en_q = dias_incap_mes
+    incap_100 = max(0, min(en_q, 2 - prev))
+    incap_66 = en_q - incap_100
+    return {"dias_no_pago": dias_no_pago,
+            "dias_incapacidad": incap_66,
+            "dias_incap_100": incap_100}
+
+
 def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extra,
                     bonificaciones, deducciones_adicionales,
                     periodo_pago='mensual', quincena=0, prestamo=0,
-                    periodo=None):
+                    periodo=None, dias_incapacidad=0):
     """Calcula valores de nómina con deducciones de ley sobre el IBC.
 
     - IBC = salario proporcional + extras + bonificaciones.
@@ -3002,6 +3380,10 @@ def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extr
       supera el umbral de SMMLV parametrizado (por defecto 4 SMMLV).
     - Auxilio de transporte: prorrateado por días trabajados, solo si el
       salario no supera 2 SMMLV.
+    - Retención en la fuente (Art. 383 ET): tabla UVT mensual proyectada
+      desde el ingreso gravable del período; en quincena se prorratea.
+    - dias_incapacidad: días incluidos en dias_trabajados que se pagan al
+      66.67% (incapacidad desde el día 3).
     `periodo` ('YYYY-MM') selecciona los parámetros legales del año vigente;
     los cálculos históricos se reproducen con los valores de su año.
     """
@@ -3015,8 +3397,11 @@ def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extr
 
     sb = D(salario_base)
     salario_dia = sb / 30
+    dias = D(dias_trabajados); incap = min(D(dias_incapacidad), dias)
 
-    salario_proporcional = salario_dia * D(dias_trabajados)
+    # Días de incapacidad (desde el día 3) se pagan al 66.67%
+    salario_proporcional = (salario_dia * (dias - incap)
+                            + salario_dia * incap * PCT_INCAPACIDAD)
     valor_horas_extras   = D(horas_extras) * D(valor_hora_extra)
     ibc                  = salario_proporcional + valor_horas_extras + D(bonificaciones)
     aux_transporte       = (aux_mes / 30 * D(dias_trabajados)
@@ -3027,7 +3412,15 @@ def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extr
     pension = ibc * pct_pension
     fsp     = ibc * pct_fsp if sb >= smmlv * umbral_fsp else Decimal("0")
 
-    salario_neto = (salario_bruto - salud - pension - fsp
+    # Retención en la fuente (Art. 383 ET): se calcula sobre el ingreso
+    # mensual proyectado (en quincena el gravable se duplica y el impuesto
+    # se parte a la mitad, manteniendo el total mensual correcto).
+    uvt = D(p.get("uvt") or 0)
+    factor_mes = D(30) / (D(15) if periodo_pago == 'quincenal' else D(30))
+    retencion = calcular_retencion(
+        ibc * factor_mes, (salud + pension + fsp) * factor_mes, uvt) / factor_mes
+
+    salario_neto = (salario_bruto - salud - pension - fsp - retencion
                     - D(deducciones_adicionales) - D(prestamo))
 
     return {
@@ -3037,9 +3430,10 @@ def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extr
         "salud":           pesos(salud),
         "pension":         pesos(pension),
         "fsp":             pesos(fsp),
+        "retencion":       pesos(retencion),
         "prestamo":        pesos(prestamo),
         "salario_neto":    pesos(salario_neto),
-        "deducciones_ley": pesos(salud + pension + fsp),
+        "deducciones_ley": pesos(salud + pension + fsp + retencion),
         "dias_base":       15 if periodo_pago == 'quincenal' else 30,
     }
 

@@ -204,6 +204,7 @@ def generar_colilla(nomina: dict, output_path: str = None, empresa_id: int = Non
     s_hdr_red = ParagraphStyle("dhr", fontName="Helvetica-Bold", fontSize=9, textColor=WHITE)
     ded_total_val = (float(nomina.get("salud",0)) + float(nomina.get("pension",0))
                      + float(nomina.get("fsp") or 0)
+                     + float(nomina.get("retencion") or 0)
                      + float(nomina.get("prestamo",0)) + float(nomina.get("deducciones",0)))
     ded_data = [
         [Paragraph("Concepto",s_hdr_red), Paragraph("Detalle",s_hdr_wc), Paragraph("Valor",s_hdr_wc)],
@@ -214,6 +215,10 @@ def generar_colilla(nomina: dict, output_path: str = None, empresa_id: int = Non
         ded_data.append([Paragraph("Fondo Solidaridad Pensional",value_style),
                          Paragraph("% del IBC",s_val_c),
                          Paragraph(fmt_currency(nomina.get("fsp",0)),s_val_r)])
+    if float(nomina.get("retencion") or 0) > 0:
+        ded_data.append([Paragraph("Retención en la fuente",value_style),
+                         Paragraph("Art. 383 ET",s_val_c),
+                         Paragraph(fmt_currency(nomina.get("retencion",0)),s_val_r)])
     ded_data += [
         [Paragraph("Préstamo",value_style),            Paragraph("Cuota",s_val_c), Paragraph(fmt_currency(nomina.get("prestamo",0)),s_val_r)],
         [Paragraph("Otras deducciones",value_style),   Paragraph("—",s_val_c),     Paragraph(fmt_currency(nomina.get("deducciones",0)),s_val_r)],
@@ -358,7 +363,7 @@ def generar_reporte_nomina(empresa: dict, nominas: list, periodo: str, output_pa
     total_bruto = total_neto = total_ded = 0
     for i, n in enumerate(nominas, 1):
         ded_total = (float(n.get("salud",0)) + float(n.get("pension",0))
-                     + float(n.get("fsp") or 0)
+                     + float(n.get("fsp") or 0) + float(n.get("retencion") or 0)
                      + float(n.get("prestamo",0)) + float(n.get("deducciones",0)))
         total_bruto += float(n.get("salario_bruto",0))
         total_neto  += float(n.get("salario_neto",0))

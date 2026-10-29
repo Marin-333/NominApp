@@ -135,7 +135,7 @@ calc_dec = db.calcular_nomina(1234567.89, 13, 2.5, 15432.10, 333333.33, 11111.11
                               periodo_pago='mensual', prestamo=5000.55)
 check("decimal: bruto-neto exacto",
       round(calc_dec["salario_bruto"] - calc_dec["salud"] - calc_dec["pension"]
-            - 11111.11 - 5000.55, 2) == calc_dec["salario_neto"])
+            - calc_dec["fsp"] - 11111.11 - 5000.55, 2) == calc_dec["salario_neto"])
 check("decimal: resultados a 2 decimales", all(
     round(v, 2) == v for v in calc_dec.values() if isinstance(v, float)))
 calc_prest = db.calcular_pago_prestacion(123456.78, 7, 100.5, 50.25, 0)
@@ -159,21 +159,35 @@ check("tipo_vinculacion", db.obtener_empleado(E2, EID)["tipo_vinculacion"] == "p
 run("actualizar_empleado", lambda: db.actualizar_empleado(E1, EID, "Juan P", "1001", "Op", 2100000, "2024-01-15"))
 check("salario actualizado", db.obtener_empleado(E1, EID)["salario"] == 2100000)
 
-# Cálculo nómina
+# Cálculo nómina (Fase 4: deducciones como % del IBC + aux. transporte + FSP)
+params = db.parametros_vigentes()
+aux_mes = params["aux_transporte"]; pct_sal = params["pct_salud"]/100
+pct_pen = params["pct_pension"]/100
 c = db.calcular_nomina(2000000, 30, 0, 0, 0, 0, periodo_pago='mensual')
 print("   mensual:", c)
-check("mensual bruto == salario", c["salario_bruto"] == 2000000)
+check("mensual IBC == salario", c["ibc"] == 2000000)
+check("mensual aux transporte (<=2 SMMLV)", c["aux_transporte"] == aux_mes)
+check("mensual bruto == salario + aux", c["salario_bruto"] == 2000000 + aux_mes)
 c1 = db.calcular_nomina(2000000, 15, 0, 0, 0, 0, periodo_pago='quincenal', quincena=1)
 c2 = db.calcular_nomina(2000000, 15, 0, 0, 0, 0, periodo_pago='quincenal', quincena=2)
 print("   Q1:", c1, "\n   Q2:", c2)
-check("Q1 salud>0 pension=0", c1["salud"] > 0 and c1["pension"] == 0)
-check("Q2 pension>0 salud=0", c2["pension"] > 0 and c2["salud"] == 0)
+check("Q1 descuenta salud y pension", c1["salud"] > 0 and c1["pension"] > 0)
+check("Q2 descuenta salud y pension", c2["salud"] > 0 and c2["pension"] > 0)
 check("Q1+Q2 ded == mensual ded",
       abs((c1["salud"]+c1["pension"] + c2["salud"]+c2["pension"]) - (c["salud"]+c["pension"])) < 0.01,
       f"Q={c1['salud']+c1['pension']+c2['salud']+c2['pension']} M={c['salud']+c['pension']}")
-check("salud y pension mensual etiquetadas",
-      c["salud"] == db.DEDUCCION_SALUD_QUINCENA and c["pension"] == db.DEDUCCION_PENSION_QUINCENA,
+check("salud/pension = % del IBC",
+      c["salud"] == 2000000*pct_sal and c["pension"] == 2000000*pct_pen,
       f"salud={c['salud']} pension={c['pension']}")
+# Auxilio de transporte: se pierde por encima de 2 SMMLV
+c_alt = db.calcular_nomina(params["smmlv"]*2 + 1, 30, 0, 0, 0, 0, periodo_pago='mensual')
+check("sin aux transporte >2 SMMLV", c_alt["aux_transporte"] == 0)
+# FSP: aplica desde el umbral (4 SMMLV por defecto)
+c_fsp = db.calcular_nomina(params["smmlv"]*params["umbral_fsp_smmlv"], 30, 0, 0, 0, 0,
+                           periodo_pago='mensual')
+check("FSP desde umbral SMMLV", c_fsp["fsp"] == round(
+    c_fsp["ibc"]*params["pct_fsp"]/100, 2), f"fsp={c_fsp['fsp']}")
+check("sin FSP bajo umbral", c["fsp"] == 0)
 
 # Guardar nómina
 ok, msg, nid = db.guardar_nomina(EID, E1, "2026-09", 30, 4, 20000, 100000, 50000, "obs", 2100000)
@@ -186,7 +200,10 @@ E3 = db.listar_empleados(EID2)[0]["id"]
 ok, msg, nidq = db.guardar_nomina(EID2, E3, "2026-09", 15, 0,0,0,0,"",1800000, quincena=1, periodo_pago='quincenal')
 check("guardar_nomina quincenal Q1", ok, msg)
 nq1 = db.obtener_nomina(nidq, EID2)
-check("Q1 salud descontada", nq1["salud"] == db.DEDUCCION_SALUD_QUINCENA, f"salud={nq1['salud']}")
+check("Q1 salud descontada (4% IBC)", nq1["salud"] == 900000*pct_sal,
+      f"salud={nq1['salud']}")
+check("nomina guarda aux/ibc", nq1["auxilio_transporte"] > 0 and nq1["ibc"] == 900000,
+      f"aux={nq1['auxilio_transporte']} ibc={nq1['ibc']}")
 n = db.obtener_nomina(nid, EID)
 check("nomina datos", n["empleado_nombre"] == "Juan P" and n["periodo"] == "2026-09")
 
@@ -196,6 +213,51 @@ check("guardar_nomina_prestacion", ok, msg)
 np_ = db.obtener_nomina(nidp, EID)
 check("prestacion bruto", np_["salario_bruto"] == 150000*12 + 50000, f"{np_['salario_bruto']}")
 check("prestacion sin deducciones ley", np_["salud"] == 0 and np_["pension"] == 0)
+
+# ── Parámetros legales y novedades (Fase 4) ────────────────────────────────
+plist = db.listar_parametros_legales()
+check("parámetros sembrados 2025/2026",
+      {p["anio"] for p in plist} >= {2025, 2026})
+check("parámetros 2026 correctos",
+      params["smmlv"] == 1750905 and params["aux_transporte"] == 249095,
+      f"{params['smmlv']}/{params['aux_transporte']}")
+check("vigencia por año del período",
+      db.parametros_vigentes("2025-06")["smmlv"] == 1423500)
+ok, msg = db.guardar_parametros_legales(2027, 1900000, 260000, 55000, 4, 4, 1, 4)
+check("guardar parametros 2027", ok, msg)
+check("vigentes() toma 2027", db.parametros_vigentes("2027-03")["smmlv"] == 1900000)
+# Cálculo histórico: mismo sueldo en 2025 usa el aux de 2025 (200.000), no el de 2026
+c25 = db.calcular_nomina(2000000, 30, 0, 0, 0, 0, periodo="2025-01")
+check("año 2025 usa aux 2025", c25["aux_transporte"] == 200000,
+      f"aux={c25['aux_transporte']}")
+ok, msg = db.guardar_parametros_legales(2027, 1950000, 260000, 55000, 4, 4, 1, 4)
+check("actualizar parametros (upsert)", ok and
+      db.parametros_vigentes("2027-01")["smmlv"] == 1950000, msg)
+db.establecer_sesion(adm)
+check("admin NO lee parámetros", _denegado(db.listar_parametros_legales))
+check("admin NO edita parámetros", _denegado(
+    lambda: db.guardar_parametros_legales(2028, 1, 1)))
+db.establecer_sesion(u)
+
+# Novedades
+ok, msg = db.crear_novedad(EID, E1, "incapacidad", "2026-09-05", "2026-09-10", None, "EG 5 días")
+check("crear_novedad", ok, msg)
+ok, msg = db.crear_novedad(EID, E1, "tipo_falso", "2026-09-01")
+check("tipo novedad inválido", not ok)
+novs = db.listar_novedades(EID)
+check("listar novedades", len(novs) == 1 and novs[0]["empleado_nombre"] == "Juan P")
+NOVID = novs[0]["id"]
+ok, msg = db.actualizar_novedad(NOVID, "incapacidad", "2026-09-05", "2026-09-12",
+                                None, "extendida", estado="cerrada")
+check("cerrar novedad", ok and db.obtener_novedad(NOVID)["estado"] == "cerrada", msg)
+db.establecer_sesion(adm)
+check("admin NO crea novedad ajena", _denegado(
+    lambda: db.crear_novedad(EID2, E1, "retiro", "2026-09-01")))
+check("admin NO lista novedades ajenas", _denegado(
+    lambda: db.listar_novedades(EID2)))
+db.establecer_sesion(u)
+ok, msg = db.eliminar_novedad(NOVID)
+check("eliminar novedad", ok and db.listar_novedades(EID) == [])
 
 # Contratos
 ok, msg = db.crear_contrato(EID, E2, "Contrato obra", 5000000, "2026-09-01", "2026-12-31", 100000, "obs")

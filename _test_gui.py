@@ -39,14 +39,14 @@ def sec(win, name):
 # AdminWin — todas las secciones
 w = app.AdminWin(adm)
 w.update_idletasks()
-for s in ["dash","emps","prestamos","contratos","nomina","colilla","hist","rep","bitacora","backup"]:
+for s in ["dash","emps","prestamos","novedades","contratos","nomina","colilla","hist","rep","bitacora","backup"]:
     sec(w, s)
 w.destroy()
 
 # SuperAdminWin
 w2 = app.SuperAdminWin({"id":1,"nombre":"SA","rol":"superadmin"})
 w2.update_idletasks()
-for s in ["empresas","admins","bitacora","backup"]:
+for s in ["empresas","admins","bitacora","parametros","backup"]:
     sec(w2, s)
 w2.destroy()
 

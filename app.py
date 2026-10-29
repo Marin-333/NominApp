@@ -639,6 +639,7 @@ class SuperAdminWin(BaseWin):
             [("empresas","🏢  Empresas",self._s_empresas),
              ("admins",  "👥  Administradores",self._s_admins),
              ("bitacora","📜  Bitácora Global",self._s_bitacora),
+             ("parametros","⚖️  Parámetros Legales",self._s_parametros),
              ("backup",  "💾  Backup General",self._s_backup)],
             geo="1200x700", minsize=(1000,600))
         self._sec("empresas")
@@ -1047,6 +1048,90 @@ class SuperAdminWin(BaseWin):
         else:
             messagebox.showerror("Error",msg,parent=self)
 
+    # ═══ PARÁMETROS LEGALES ═══════════════════════════════════════════════════
+    def _s_parametros(self):
+        self._clr()
+        self._hdr("⚖️  Parámetros Legales","Nuevo Año",self._form_parametros)
+        self._sub("SMMLV, auxilio de transporte, UVT y porcentajes de deducción "
+                  "por año. Los cálculos de nómina usan el año del período.")
+        self.tv_par=self._tree(
+            ("id","anio","smmlv","aux","uvt","salud","pension","fsp","umbral"),
+            [("ID",35),("Año",60),("SMMLV",110),("Aux. Transporte",120),
+             ("UVT",80),("% Salud",70),("% Pensión",75),("% FSP",60),("Umbral FSP",90)])
+        fr=tk.Frame(self.ct,bg=C["bg"]); fr.pack(padx=24,anchor="w",pady=(4,18))
+        Btn(fr,"Editar",cmd=self._edit_parametros,sty="out",icon="✏").pack(side="left",padx=(0,8))
+        Btn(fr,"Eliminar",cmd=self._del_parametros,sty="err",icon="🗑").pack(side="left",padx=(0,8))
+        self._load_parametros()
+
+    def _load_parametros(self):
+        self.tv_par.delete(*self.tv_par.get_children())
+        try:
+            for i,p in enumerate(db.listar_parametros_legales()):
+                self.tv_par.insert("","end",iid=str(p["id"]),
+                    values=(p["id"],p["anio"],fmt(p["smmlv"]),fmt(p["aux_transporte"]),
+                            fmt(p["uvt"]) if p.get("uvt") else "—",
+                            f"{p['pct_salud']:g}%",f"{p['pct_pension']:g}%",
+                            f"{p['pct_fsp']:g}%",f"{p['umbral_fsp_smmlv']:g} SMMLV"),
+                    tags=self._tag(i))
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _form_parametros(self, par=None):
+        nuevo = par is None
+        win = self._win("Parámetros Legales","500x640")
+        tk.Label(win, text=f"⚖️  {'Nuevo' if nuevo else 'Editar'} año de parámetros",
+            font=F["h3"],bg=C["bg"],fg=C["txt"]).pack(pady=(20,2),padx=24,anchor="w")
+        tk.Label(win, text="Valores oficiales vigentes para ese año.",
+            font=F["sm"],bg=C["bg"],fg=C["sub"]).pack(padx=24,anchor="w",pady=(0,14))
+        e_anio=self._field(win,"Año *",val=str(par["anio"]) if par else "")
+        e_sml=self._field(win,"SMMLV (COP) *",val=str(int(par["smmlv"])) if par else "")
+        e_aux=self._field(win,"Auxilio de transporte (COP) *",
+            val=str(int(par["aux_transporte"])) if par else "")
+        e_uvt=self._field(win,"UVT (COP, opcional)",
+            val=str(int(par["uvt"])) if par and par.get("uvt") else "")
+        e_sal=self._field(win,"% Salud empleado *",
+            val=f"{par['pct_salud']:g}" if par else "4")
+        e_pen=self._field(win,"% Pensión empleado *",
+            val=f"{par['pct_pension']:g}" if par else "4")
+        e_fsp=self._field(win,"% Fondo Solidaridad Pensional *",
+            val=f"{par['pct_fsp']:g}" if par else "1")
+        e_umb=self._field(win,"Umbral FSP en SMMLV *",
+            val=f"{par['umbral_fsp_smmlv']:g}" if par else "4")
+        le=self._err_lbl(win)
+        def save():
+            def num(e,dec=False):
+                t=e.get().strip().replace(".","" if not dec else "")
+                return float(t.replace(",",".")) if t else 0.0
+            try:
+                anio=int(e_anio.get().strip()); smmlv=num(e_sml); aux=num(e_aux)
+                uvt=num(e_uvt) or None
+                sal=num(e_sal); pen=num(e_pen); fsp=num(e_fsp); umb=num(e_umb)
+            except: le.config(text="⚠  Valores inválidos."); return
+            try:
+                ok,msg=db.guardar_parametros_legales(anio,smmlv,aux,uvt,
+                    sal,pen,fsp,umb)
+            except Exception as ex: le.config(text=f"Error: {ex}"); return
+            if ok: messagebox.showinfo("✓ Éxito",msg,parent=win); win.destroy(); self._load_parametros()
+            else:  le.config(text=f"✗  {msg}")
+        self._btns(win,save,"Guardar parámetros")
+
+    def _edit_parametros(self):
+        pid=self._sel(self.tv_par,"registro")
+        if pid is None: return
+        try:
+            par=next((p for p in db.listar_parametros_legales() if p["id"]==pid),None)
+            if not par: messagebox.showerror("Error","Registro no encontrado.",parent=self); return
+            self._form_parametros(par)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _del_parametros(self):
+        pid=self._sel(self.tv_par,"registro")
+        if pid is None: return
+        if not messagebox.askyesno("Confirmar eliminación",
+            "¿Eliminar estos parámetros?\nLas nóminas de ese año usarán los "
+            "valores del año más reciente disponible.",parent=self): return
+        try: db.eliminar_parametros_legales(pid); self._load_parametros()
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
 
 # ─── ADMIN ────────────────────────────────────────────────────────────────────
 class AdminWin(BaseWin):
@@ -1060,6 +1145,7 @@ class AdminWin(BaseWin):
             [("dash",    "📊  Dashboard",        self._s_dash),
              ("emps",    "👤  Empleados",         self._s_emps),
              ("prestamos","💳  Préstamos",        self._s_prestamos),
+             ("novedades","📅  Novedades",        self._s_novedades),
              ("contratos","📋  Contratos",        self._s_contratos),
              ("nomina",  "💰  Nómina",           self._s_nomina),
              ("colilla", "🧾  Colillas de Pago",  self._s_colilla),
@@ -1856,6 +1942,131 @@ class AdminWin(BaseWin):
         try: db.eliminar_prestamo(pid); self._load_prestamos()
         except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
 
+    # ═══ NOVEDADES ═══════════════════════════════════════════════════════════
+    def _s_novedades(self):
+        self._clr()
+        self._hdr("📅  Novedades de Nómina","Nueva Novedad",self._form_novedad)
+        self._sub("Incapacidades, licencias, vacaciones, suspensiones y otros eventos "
+                  "que afectan la nómina (base para el reporte DIAN).")
+        self.tv_nov=self._tree(
+            ("id","empleado","tipo","inicio","fin","valor","estado","obs"),
+            [("ID",35),("Empleado",180),("Tipo",170),("Inicio",95),
+             ("Fin",95),("Valor",95),("Estado",75),("Observaciones",180)])
+        fr=tk.Frame(self.ct,bg=C["bg"]); fr.pack(padx=24,anchor="w",pady=(4,18))
+        Btn(fr,"Editar",cmd=self._edit_novedad,sty="out",icon="✏").pack(side="left",padx=(0,8))
+        Btn(fr,"Cerrar novedad",cmd=self._cerrar_novedad,sty="gh",icon="✔").pack(side="left",padx=(0,8))
+        Btn(fr,"Eliminar",cmd=self._del_novedad,sty="err",icon="🗑").pack(side="left",padx=(0,8))
+        self._load_novedades()
+
+    def _load_novedades(self):
+        self.tv_nov.delete(*self.tv_nov.get_children())
+        try:
+            for i,n in enumerate(db.listar_novedades(self.eid)):
+                self.tv_nov.insert("","end",iid=str(n["id"]),
+                    values=(n["id"],n.get("empleado_nombre",""),
+                            db.TIPOS_NOVEDAD.get(n["tipo"],n["tipo"]),
+                            n.get("fecha_inicio",""),n.get("fecha_fin") or "—",
+                            fmt(n["valor"]) if n.get("valor") else "—",
+                            "✅ Cerrada" if n.get("estado")=="cerrada" else "Activa",
+                            (n.get("observaciones") or "")[:40]),
+                    tags=self._tag(i))
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _form_novedad(self, nov=None):
+        nuevo = nov is None
+        win = self._win("Nueva Novedad" if nuevo else "Editar Novedad","500x620")
+        tk.Label(win, text=f"📅  {'Nueva' if nuevo else 'Editar'} Novedad",
+            font=F["h3"],bg=C["bg"],fg=C["txt"]).pack(pady=(20,2),padx=24,anchor="w")
+
+        try:    emps=db.listar_empleados(self.eid)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=win); return
+        if not emps:
+            messagebox.showwarning("Sin empleados","Registra empleados primero.",parent=win); return
+
+        tk.Label(win,text="Empleado *",font=F["sm"],bg=C["bg"],fg=C["sub"]).pack(padx=24,anchor="w")
+        emp_opts=[f"{e['nombre']}  —  {e['cargo']}" for e in emps]
+        cb_emp=Cbo(win,values=emp_opts,state="readonly",width=40)
+        cb_emp.pack(padx=24,fill="x",ipady=4,pady=(2,10))
+        if nov:
+            ids=[e["id"] for e in emps]
+            if nov["empleado_id"] in ids: cb_emp.current(ids.index(nov["empleado_id"]))
+            cb_emp.config(state="disabled")
+
+        tk.Label(win,text="Tipo de novedad *",font=F["sm"],bg=C["bg"],fg=C["sub"]).pack(padx=24,anchor="w")
+        tipos=list(db.TIPOS_NOVEDAD.keys())
+        cb_tipo=Cbo(win,values=[db.TIPOS_NOVEDAD[t] for t in tipos],state="readonly",width=40)
+        cb_tipo.pack(padx=24,fill="x",ipady=4,pady=(2,10))
+        cb_tipo.current(tipos.index(nov["tipo"]) if nov and nov["tipo"] in tipos else 0)
+
+        hoy=datetime.now().strftime("%Y-%m-%d")
+        e_ini=self._field(win,"Fecha inicio (YYYY-MM-DD) *",
+            val=nov.get("fecha_inicio","") if nov else hoy)
+        e_fin=self._field(win,"Fecha fin (YYYY-MM-DD, opcional)",
+            val=(nov.get("fecha_fin") or "") if nov else "")
+        e_val=self._field(win,"Valor asociado (COP, opcional)",
+            val=str(int(nov["valor"])) if nov and nov.get("valor") else "")
+        e_obs=self._field(win,"Observaciones",
+            val=(nov.get("observaciones") or "") if nov else "")
+
+        le=self._err_lbl(win)
+        def save():
+            i=cb_emp.current(); ti=cb_tipo.current()
+            if i<0: le.config(text="⚠  Selecciona un empleado."); return
+            fi=e_ini.get().strip(); ff=e_fin.get().strip() or None
+            try: datetime.strptime(fi,"%Y-%m-%d")
+            except: le.config(text="⚠  Fecha de inicio inválida (YYYY-MM-DD)."); return
+            if ff:
+                try: datetime.strptime(ff,"%Y-%m-%d")
+                except: le.config(text="⚠  Fecha fin inválida (YYYY-MM-DD)."); return
+            valor=None
+            vtxt=e_val.get().strip()
+            if vtxt:
+                try:
+                    valor=float(vtxt.replace(".","").replace(",","."))
+                    if valor<0: raise ValueError
+                except: le.config(text="⚠  Valor inválido."); return
+            try:
+                if nuevo:
+                    ok,msg=db.crear_novedad(self.eid,emps[i]["id"],tipos[ti],fi,
+                        ff,valor,e_obs.get().strip() or None)
+                else:
+                    ok,msg=db.actualizar_novedad(nov["id"],tipos[ti],fi,ff,
+                        valor,e_obs.get().strip() or None)
+            except Exception as ex: le.config(text=f"Error: {ex}"); return
+            if ok: messagebox.showinfo("✓ Éxito",msg,parent=win); win.destroy(); self._load_novedades()
+            else:  le.config(text=f"✗  {msg}")
+        self._btns(win,save,"Guardar novedad")
+
+    def _edit_novedad(self):
+        nid=self._sel(self.tv_nov,"novedad")
+        if nid is None: return
+        try:
+            nov=db.obtener_novedad(nid)
+            if not nov: messagebox.showerror("Error","Novedad no encontrada.",parent=self); return
+            self._form_novedad(nov)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _cerrar_novedad(self):
+        nid=self._sel(self.tv_nov,"novedad")
+        if nid is None: return
+        try:
+            nov=db.obtener_novedad(nid)
+            if not nov or nov.get("estado")=="cerrada": return
+            ok,msg=db.actualizar_novedad(nid,nov["tipo"],nov["fecha_inicio"],
+                nov.get("fecha_fin"),nov.get("valor"),nov.get("observaciones"),
+                estado="cerrada")
+            if ok: self._load_novedades()
+            else: messagebox.showerror("Error",msg,parent=self)
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
+    def _del_novedad(self):
+        nid=self._sel(self.tv_nov,"novedad")
+        if nid is None: return
+        if not messagebox.askyesno("Confirmar eliminación",
+            "¿Eliminar esta novedad?\n⚠ Esta acción no se puede deshacer.",parent=self): return
+        try: db.eliminar_novedad(nid); self._load_novedades()
+        except Exception as ex: messagebox.showerror("Error",str(ex),parent=self)
+
     # ═══ CONTRATOS ════════════════════════════════════════════════════════════
     def _s_contratos(self):
         self._clr()
@@ -2333,7 +2544,7 @@ class AdminWin(BaseWin):
             self.nq = None
             if periodo_pago == "quincenal":
                 tk.Label(top,text="Quincena:",font=F["sm"],bg=C["bg"],fg=C["sub"]).pack(side="left",padx=(0,4))
-                self.nq=Cbo(top,values=["1ra quincena (Salud)","2da quincena (Pensión)"],state="readonly",width=22)
+                self.nq=Cbo(top,values=["1ra quincena","2da quincena"],state="readonly",width=22)
                 self.nq.pack(side="left",ipady=4,padx=(0,8))
                 self.nq.current(0)
 
@@ -2415,7 +2626,8 @@ class AdminWin(BaseWin):
             prestamo = sum(float(p["saldo"]) for p in prestamos_activos)
 
             c = db.calcular_nomina(float(e["salario"]), dias_default, 0, 0, 0, 0,
-                periodo_pago=periodo_pago, quincena=quincena, prestamo=prestamo)
+                periodo_pago=periodo_pago, quincena=quincena, prestamo=prestamo,
+                periodo=self.np.get().strip())
 
             data = {
                 "empleado_id": e["id"],
@@ -2478,7 +2690,8 @@ class AdminWin(BaseWin):
         # Preview
         pv_frame=tk.Frame(win,bg=C["card"]); pv_frame.pack(padx=24,fill="x",pady=(10,4))
         pv_labels={}
-        for key,lab in [("bruto","Bruto"),("salud","Salud"),("pension","Pensión"),
+        for key,lab in [("bruto","Bruto"),("aux","Aux. transporte"),("salud","Salud"),
+                        ("pension","Pensión"),("fsp","FSP"),
                         ("prest","Préstamo"),("deds","Otras Deds"),("neto","NETO")]:
             r=tk.Frame(pv_frame,bg=C["card"]); r.pack(fill="x",pady=1)
             tk.Label(r,text=lab,font=F["bd"],bg=C["card"],fg=C["sub"],width=14,anchor="w").pack(side="left")
@@ -2496,10 +2709,13 @@ class AdminWin(BaseWin):
                     float(e_vhr.get() or 0), float(e_bon.get() or 0),
                     float(e_ded.get() or 0),
                     periodo_pago=periodo_pago, quincena=quincena,
-                    prestamo=float(e_prest.get() or 0))
+                    prestamo=float(e_prest.get() or 0),
+                    periodo=self.np.get().strip())
                 pv_labels["bruto"].config(text=fmt(c["salario_bruto"]))
+                pv_labels["aux"].config(text=fmt(c["aux_transporte"]) if c['aux_transporte']>0 else "$ 0")
                 pv_labels["salud"].config(text=f"−{fmt(c['salud'])}" if c['salud']>0 else "$ 0")
                 pv_labels["pension"].config(text=f"−{fmt(c['pension'])}" if c['pension']>0 else "$ 0")
+                pv_labels["fsp"].config(text=f"−{fmt(c['fsp'])}" if c['fsp']>0 else "$ 0")
                 pv_labels["prest"].config(text=f"−{fmt(c['prestamo'])}" if c['prestamo']>0 else "$ 0")
                 pv_labels["deds"].config(text=f"−{fmt(float(e_ded.get() or 0))}" if float(e_ded.get() or 0)>0 else "$ 0")
                 pv_labels["neto"].config(text=fmt(c["salario_neto"]))
@@ -2526,7 +2742,8 @@ class AdminWin(BaseWin):
             
             # Actualizar datos temporales
             c=db.calcular_nomina(float(emp["salario"]),dias,hext,vhr,bon,ded,
-                periodo_pago=periodo_pago,quincena=quincena,prestamo=prest)
+                periodo_pago=periodo_pago,quincena=quincena,prestamo=prest,
+                periodo=self.np.get().strip())
             self._nom_data[eid] = {
                 "empleado_id": eid, "salario": float(emp["salario"]),
                 "dias": dias, "hext": hext, "vhr": vhr,

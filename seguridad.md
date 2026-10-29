@@ -46,11 +46,16 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [x] Sin sesión activa → `PermissionError` en cualquier función protegida (no hay "modo abierto")
 - [x] Pruebas: admin no puede crear/listar en otra empresa, no crea empresas/admins, no resetea passwords, no exporta backup completo, no ve bitácora global; sí opera su empresa; sin sesión se rechaza todo (`_test_all.py`, 10 checks nuevos)
 
-## Fase 4 — Cumplimiento de nómina (pre-requisito DIAN)
+## Fase 4 — Cumplimiento de nómina (pre-requisito DIAN) ✅ (parcial — base de datos/cálculos)
 
-- [ ] Tabla `parametros_legales` (SMMLV, aux. transporte, porcentajes, UVT) con vigencias anuales — no hardcodear
-- [ ] Auditar cálculos: salud 4% / pensión 4%, FSP >4 SMMLV, retención en la fuente, prestaciones sociales
-- [ ] Novedades que la DIAN exige reportar: incapacidades, licencias, vacaciones
+- [x] Tabla `parametros_legales` por año (SMMLV, aux. transporte, UVT, % salud/pensión/FSP, umbral FSP) — sembrada con valores oficiales 2025 (SMMLV 1.423.500 / aux 200.000 / UVT 49.799) y 2026 (1.750.905 / 249.095 / 52.374); CRUD solo superadmin en GUI ("⚖️ Parámetros Legales")
+- [x] `parametros_vigentes(periodo)` selecciona los valores del año del período de nómina — los cálculos históricos se reproducen con los parámetros de su año (no el valor vigente de hoy)
+- [x] **Auditoría corregida**: salud/pensión ya NO son fijos $70.036 → ahora son % parametrizado del **IBC** en cada pago (quincenal y mensual suman lo mismo); IBC = proporcional + extras + bonificaciones; auxilio de transporte **no** es factor salarial (excluido del IBC) y solo aplica ≤2 SMMLV prorrateado por días; **FSP** 1% del IBC desde 4 SMMLV (parametrizable)
+- [x] Columnas nuevas en `nominas`: `fsp`, `ibc`; `auxilio_transporte` (ya existía) ahora se persiste
+- [x] Tabla `novedades` (incapacidad, licencias maternidad/paternidad/no remunerada, vacaciones, suspensión, ingreso/retiro, variación salarial, otra) con `TIPOS_NOVEDAD` alineados a conceptos DIAN + CRUD con scope de empresa + sección "📅 Novedades" en GUI
+- [x] Colilla PDF actualizada: auxilio de transporte en devengados, FSP en deducciones, salud/pensión etiquetados "% del IBC"
+- [ ] Retención en la fuente y prestaciones sociales (prima, cesantías, intereses) — pendiente
+- [ ] Novedades aún no descuentan días automáticamente del cálculo de nómina (son registro informativo — el cálculo del efecto en pago queda para la integración DIAN)
 
 ## Fase 5 — DIAN (nómina electrónica)
 

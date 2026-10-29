@@ -474,6 +474,32 @@ def init_db():
             creado_en       TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS parametros_legales (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            anio            INTEGER NOT NULL UNIQUE,
+            smmlv           REAL NOT NULL,
+            aux_transporte  REAL NOT NULL,
+            uvt             REAL,
+            pct_salud       REAL NOT NULL DEFAULT 4.0,
+            pct_pension     REAL NOT NULL DEFAULT 4.0,
+            pct_fsp         REAL NOT NULL DEFAULT 1.0,
+            umbral_fsp_smmlv REAL NOT NULL DEFAULT 4.0,
+            creado_en       TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS novedades (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id      INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+            empleado_id     INTEGER NOT NULL REFERENCES empleados(id) ON DELETE CASCADE,
+            tipo            TEXT NOT NULL,
+            fecha_inicio    TEXT NOT NULL,
+            fecha_fin       TEXT,
+            valor           REAL,
+            observaciones   TEXT,
+            estado          TEXT DEFAULT 'activa' CHECK(estado IN ('activa','cerrada')),
+            creado_en       TEXT DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             clave   TEXT PRIMARY KEY,
             valor   TEXT
@@ -635,6 +661,25 @@ def migrar_base_datos():
         c.execute("ALTER TABLE empresas ADD COLUMN correo TEXT")
     except sqlite3.OperationalError:
         pass
+
+    # Nominación exacta: FSP e IBC (auxilio_transporte ya existe desde antes)
+    for ddl in (
+        "ALTER TABLE nominas ADD COLUMN fsp REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE nominas ADD COLUMN ibc REAL",
+    ):
+        try:
+            c.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    # Sembrar parámetros legales por año (valores oficiales Colombia)
+    c.execute("""
+        INSERT OR IGNORE INTO parametros_legales
+            (anio, smmlv, aux_transporte, uvt, pct_salud, pct_pension, pct_fsp, umbral_fsp_smmlv)
+        VALUES
+            (2025, 1423500, 200000, 49799, 4.0, 4.0, 1.0, 4.0),
+            (2026, 1750905, 249095, 52374, 4.0, 4.0, 1.0, 4.0)
+    """)
     try:
         c.execute("ALTER TABLE empresas ADD COLUMN correo_password TEXT")
     except sqlite3.OperationalError:
@@ -1139,16 +1184,19 @@ def guardar_nomina(empresa_id, empleado_id, periodo, dias_trabajados, horas_extr
 
         calc = calcular_nomina(salario_base, dias_trabajados, horas_extras,
                                valor_hora_extra, bonificaciones, deducciones,
-                               periodo_pago=periodo_pago, quincena=quincena, prestamo=prestamo)
+                               periodo_pago=periodo_pago, quincena=quincena,
+                               prestamo=prestamo, periodo=periodo)
         conn.execute("""
             INSERT INTO nominas (empresa_id, empleado_id, periodo, quincena, dias_trabajados,
                 horas_extras, valor_hora_extra, bonificaciones, deducciones,
-                salud, pension, prestamo, salario_base, salario_bruto, salario_neto, observaciones)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                salud, pension, fsp, ibc, auxilio_transporte, prestamo,
+                salario_base, salario_bruto, salario_neto, observaciones)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             empresa_id, empleado_id, periodo, quincena, dias_trabajados,
             horas_extras, pesos(valor_hora_extra), pesos(bonificaciones), pesos(deducciones),
-            calc["salud"], calc["pension"], calc["prestamo"], pesos(salario_base),
+            calc["salud"], calc["pension"], calc["fsp"], calc["ibc"],
+            calc["aux_transporte"], calc["prestamo"], pesos(salario_base),
             calc["salario_bruto"], calc["salario_neto"], observaciones
         ))
         conn.commit()
@@ -1927,13 +1975,203 @@ def importar_backup_empresa(empresa_id, ruta_origen, password=None):
 
 # ─── DEDUCCIONES DE LEY ──────────────────────────────────────────────────────
 
-# Salario mínimo legal vigente 2026 (Colombia)
-SALARIO_MINIMO_2026 = 1_423_500
-AUXILIO_TRANSPORTE_2026 = 200_700  # Para empleados que ganan <= 2 SMLV
+# Valores oficiales Colombia 2026 (fallback si la tabla parametros_legales
+# está vacía — la fuente de verdad es la tabla, editable por el superadmin)
+SALARIO_MINIMO_2026 = 1_750_905        # Decreto 1469 de 2025
+AUXILIO_TRANSPORTE_2026 = 249_095      # Decreto 1470 de 2025
 
-# Valor fijo de salud y pensión por quincena 2026
+# Legado: ya no se usan en el cálculo (salud/pensión son % del IBC desde Fase 4)
 DEDUCCION_SALUD_QUINCENA = 70_036
 DEDUCCION_PENSION_QUINCENA = 70_036
+
+# Tipos de novedad admitidos (alineados a conceptos DIAN del anexo técnico)
+TIPOS_NOVEDAD = {
+    "ingreso":                  "Ingreso del trabajador",
+    "retiro":                   "Retiro del trabajador",
+    "vacaciones":               "Vacaciones",
+    "incapacidad":              "Incapacidad",
+    "licencia_maternidad":      "Licencia de maternidad",
+    "licencia_paternidad":      "Licencia de paternidad",
+    "licencia_no_remunerada":   "Licencia no remunerada",
+    "suspension":               "Suspensión del contrato",
+    "variacion_salarial":       "Variación salarial",
+    "otra":                     "Otra novedad",
+}
+
+
+# ─── PARÁMETROS LEGALES (Fase 4) ─────────────────────────────────────────────
+
+def _parametros_default():
+    return {"anio": datetime.now().year, "smmlv": SALARIO_MINIMO_2026,
+            "aux_transporte": AUXILIO_TRANSPORTE_2026, "uvt": 52374,
+            "pct_salud": 4.0, "pct_pension": 4.0, "pct_fsp": 1.0,
+            "umbral_fsp_smmlv": 4.0}
+
+
+def parametros_vigentes(periodo=None):
+    """Parámetros legales del año de `periodo` ('YYYY-MM' o 'YYYY-MM-DD');
+    sin periodo, del año actual. Si el año no está sembrado, usa el más
+    reciente anterior a ese año (o el primero disponible); como último
+    recurso, los valores por defecto del código."""
+    anio = None
+    if periodo:
+        try:
+            anio = int(str(periodo)[:4])
+        except (ValueError, IndexError):
+            anio = None
+    if anio is None:
+        anio = datetime.now().year
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM parametros_legales WHERE anio<=? ORDER BY anio DESC LIMIT 1",
+            (anio,)).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT * FROM parametros_legales ORDER BY anio ASC LIMIT 1"
+            ).fetchone()
+    except sqlite3.OperationalError:
+        row = None   # tabla aún no existe (migración en curso)
+    finally:
+        conn.close()
+    return dict(row) if row else _parametros_default()
+
+
+def listar_parametros_legales():
+    _requerir_rol("superadmin")
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM parametros_legales ORDER BY anio DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def guardar_parametros_legales(anio, smmlv, aux_transporte, uvt=None,
+                               pct_salud=4.0, pct_pension=4.0,
+                               pct_fsp=1.0, umbral_fsp_smmlv=4.0):
+    """Crea o actualiza los parámetros legales de un año (superadmin)."""
+    _requerir_rol("superadmin")
+    if not anio or int(anio) < 2000:
+        return False, "Año inválido."
+    if D(smmlv) <= 0 or D(aux_transporte) < 0:
+        return False, "SMMLV y auxilio de transporte deben ser positivos."
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO parametros_legales
+                (anio, smmlv, aux_transporte, uvt, pct_salud, pct_pension,
+                 pct_fsp, umbral_fsp_smmlv)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(anio) DO UPDATE SET
+                smmlv=excluded.smmlv, aux_transporte=excluded.aux_transporte,
+                uvt=excluded.uvt, pct_salud=excluded.pct_salud,
+                pct_pension=excluded.pct_pension, pct_fsp=excluded.pct_fsp,
+                umbral_fsp_smmlv=excluded.umbral_fsp_smmlv
+        """, (int(anio), pesos(smmlv), pesos(aux_transporte),
+              pesos(uvt) if uvt else None,
+              float(pct_salud), float(pct_pension), float(pct_fsp),
+              float(umbral_fsp_smmlv)))
+        conn.commit()
+        return True, f"Parámetros del año {anio} guardados."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def eliminar_parametros_legales(param_id):
+    _requerir_rol("superadmin")
+    conn = get_connection()
+    conn.execute("DELETE FROM parametros_legales WHERE id=?", (param_id,))
+    conn.commit()
+    conn.close()
+    return True, "Parámetros eliminados."
+
+
+# ─── NOVEDADES (Fase 4) ──────────────────────────────────────────────────────
+
+def crear_novedad(empresa_id, empleado_id, tipo, fecha_inicio,
+                  fecha_fin=None, valor=None, observaciones=None):
+    """Registra una novedad de nómina (incapacidad, licencia, vacaciones…)."""
+    _verificar_scope_empresa(empresa_id)
+    if tipo not in TIPOS_NOVEDAD:
+        return False, f"Tipo de novedad inválido. Válidos: {', '.join(TIPOS_NOVEDAD)}."
+    if not fecha_inicio:
+        return False, "La fecha de inicio es obligatoria."
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO novedades (empresa_id, empleado_id, tipo, fecha_inicio,
+                fecha_fin, valor, observaciones)
+            VALUES (?,?,?,?,?,?,?)
+        """, (empresa_id, empleado_id, tipo, fecha_inicio, fecha_fin,
+              pesos(valor) if valor is not None else None, observaciones))
+        conn.commit()
+        return True, "Novedad registrada."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def listar_novedades(empresa_id, empleado_id=None, estado=None):
+    _verificar_scope_empresa(empresa_id)
+    filtros = ["n.empresa_id=?"]; params = [empresa_id]
+    if empleado_id:
+        filtros.append("n.empleado_id=?"); params.append(empleado_id)
+    if estado:
+        filtros.append("n.estado=?");   params.append(estado)
+    conn = get_connection()
+    rows = conn.execute(f"""
+        SELECT n.*, e.nombre as empleado_nombre, e.documento
+        FROM novedades n JOIN empleados e ON n.empleado_id = e.id
+        WHERE {' AND '.join(filtros)}
+        ORDER BY n.fecha_inicio DESC
+    """, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def obtener_novedad(novedad_id):
+    conn = get_connection()
+    _verificar_scope_registro(conn, "novedades", novedad_id)
+    row = conn.execute(
+        "SELECT * FROM novedades WHERE id=?", (novedad_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def actualizar_novedad(novedad_id, tipo, fecha_inicio, fecha_fin=None,
+                       valor=None, observaciones=None, estado=None):
+    conn = get_connection()
+    _verificar_scope_registro(conn, "novedades", novedad_id)
+    if tipo not in TIPOS_NOVEDAD:
+        return False, "Tipo de novedad inválido."
+    try:
+        if estado is not None:
+            conn.execute(
+                "UPDATE novedades SET estado=? WHERE id=?", (estado, novedad_id))
+        conn.execute("""
+            UPDATE novedades SET tipo=?, fecha_inicio=?, fecha_fin=?,
+                valor=?, observaciones=? WHERE id=?
+        """, (tipo, fecha_inicio, fecha_fin,
+              pesos(valor) if valor is not None else None,
+              observaciones, novedad_id))
+        conn.commit()
+        return True, "Novedad actualizada."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def eliminar_novedad(novedad_id):
+    conn = get_connection()
+    _verificar_scope_registro(conn, "novedades", novedad_id)
+    conn.execute("DELETE FROM novedades WHERE id=?", (novedad_id,))
+    conn.commit()
+    conn.close()
+    return True, "Novedad eliminada."
 
 # ─── Dinero exacto ────────────────────────────────────────────────────────────
 # Toda la aritmética monetaria se hace en Decimal y se cuantiza a 2 decimales
@@ -1979,46 +2217,67 @@ def _actualizar_cuota_prestamo(conn, empresa_id, empleado_id, monto_desc):
 
 def calcular_nomina(salario_base, dias_trabajados, horas_extras, valor_hora_extra,
                     bonificaciones, deducciones_adicionales,
-                    periodo_pago='mensual', quincena=0, prestamo=0):
-    """Calcula valores de nómina.
-    - Mensual: salario completo / 30 × días
-    - Quincenal: salario_base / 2 es la base de 15 días
+                    periodo_pago='mensual', quincena=0, prestamo=0,
+                    periodo=None):
+    """Calcula valores de nómina con deducciones de ley sobre el IBC.
+
+    - IBC = salario proporcional + extras + bonificaciones.
+      El auxilio de transporte NO es factor salarial (no entra al IBC).
+    - Salud y pensión: % parametrizado del IBC, descontado en CADA pago
+      (quincena o mes) — ya no son valores fijos.
+    - FSP (Fondo de Solidaridad Pensional): % del IBC cuando el salario
+      supera el umbral de SMMLV parametrizado (por defecto 4 SMMLV).
+    - Auxilio de transporte: prorrateado por días trabajados, solo si el
+      salario no supera 2 SMMLV.
+    `periodo` ('YYYY-MM') selecciona los parámetros legales del año vigente;
+    los cálculos históricos se reproducen con los valores de su año.
     """
-    salario_dia = D(salario_base) / 30
+    p = parametros_vigentes(periodo)
+    smmlv        = D(p["smmlv"])
+    aux_mes      = D(p["aux_transporte"])
+    pct_salud    = D(p["pct_salud"]) / 100
+    pct_pension  = D(p["pct_pension"]) / 100
+    pct_fsp      = D(p["pct_fsp"]) / 100
+    umbral_fsp   = D(p["umbral_fsp_smmlv"])
+
+    sb = D(salario_base)
+    salario_dia = sb / 30
 
     salario_proporcional = salario_dia * D(dias_trabajados)
     valor_horas_extras   = D(horas_extras) * D(valor_hora_extra)
-    salario_bruto        = salario_proporcional + valor_horas_extras + D(bonificaciones)
+    ibc                  = salario_proporcional + valor_horas_extras + D(bonificaciones)
+    aux_transporte       = (aux_mes / 30 * D(dias_trabajados)
+                            if sb <= smmlv * 2 else Decimal("0"))
+    salario_bruto        = ibc + aux_transporte
 
-    # Deducciones fijas según período
-    salud = pension = Decimal("0")
-    if periodo_pago == 'quincenal':
-        if quincena == 1:
-            salud   = D(DEDUCCION_SALUD_QUINCENA)
-        elif quincena == 2:
-            pension = D(DEDUCCION_PENSION_QUINCENA)
-    else:
-        # Mensual: se descuenta salud y pensión una vez cada una
-        salud   = D(DEDUCCION_SALUD_QUINCENA)
-        pension = D(DEDUCCION_PENSION_QUINCENA)
+    salud   = ibc * pct_salud
+    pension = ibc * pct_pension
+    fsp     = ibc * pct_fsp if sb >= smmlv * umbral_fsp else Decimal("0")
 
-    salario_neto = salario_bruto - salud - pension - D(deducciones_adicionales) - D(prestamo)
+    salario_neto = (salario_bruto - salud - pension - fsp
+                    - D(deducciones_adicionales) - D(prestamo))
 
     return {
-        "salario_bruto": pesos(salario_bruto),
-        "salud":         pesos(salud),
-        "pension":       pesos(pension),
-        "prestamo":      pesos(prestamo),
-        "salario_neto":  pesos(salario_neto),
-        "dias_base":     15 if periodo_pago == 'quincenal' else 30,
+        "salario_bruto":   pesos(salario_bruto),
+        "aux_transporte":  pesos(aux_transporte),
+        "ibc":             pesos(ibc),
+        "salud":           pesos(salud),
+        "pension":         pesos(pension),
+        "fsp":             pesos(fsp),
+        "prestamo":        pesos(prestamo),
+        "salario_neto":    pesos(salario_neto),
+        "deducciones_ley": pesos(salud + pension + fsp),
+        "dias_base":       15 if periodo_pago == 'quincenal' else 30,
     }
 
 
-def validar_salario_minimo(salario):
-    """Retorna (ok, mensaje) indicando si el salario está por debajo del mínimo 2026."""
-    if salario < SALARIO_MINIMO_2026:
+def validar_salario_minimo(salario, periodo=None):
+    """Retorna (ok, mensaje) indicando si el salario está por debajo del
+    SMMLV vigente para el período (o el año actual)."""
+    smmlv = D(parametros_vigentes(periodo)["smmlv"])
+    if D(salario) < smmlv:
         return False, (f"⚠ El salario ingresado ($ {salario:,.0f}) está por debajo del "
-                       f"salario mínimo legal 2026 ($ {SALARIO_MINIMO_2026:,.0f}).")
+                       f"salario mínimo legal vigente ($ {smmlv:,.0f}).")
     return True, ""
 
 

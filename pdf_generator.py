@@ -180,8 +180,13 @@ def generar_colilla(nomina: dict, output_path: str = None, empresa_id: int = Non
         [Paragraph(concepto_lbl,value_style), Paragraph(concepto_det,s_val_c), Paragraph(fmt_currency(concepto_val),s_val_r)],
         [Paragraph("Horas extras",value_style), Paragraph(f"{nomina.get('horas_extras',0)} hrs",s_val_c), Paragraph(fmt_currency(float(nomina.get('horas_extras',0))*float(nomina.get('valor_hora_extra',0))),s_val_r)],
         [Paragraph("Bonificaciones",value_style), Paragraph("—",s_val_c), Paragraph(fmt_currency(nomina.get("bonificaciones",0)),s_val_r)],
-        [Paragraph("TOTAL DEVENGADO",s_tot), Paragraph("",s_val_c), Paragraph(fmt_currency(nomina.get("salario_bruto",0)),s_tot_r)],
     ]
+    if float(nomina.get("auxilio_transporte") or 0) > 0:
+        dev_data.append([Paragraph("Auxilio de transporte",value_style),
+                         Paragraph("No salarial",s_val_c),
+                         Paragraph(fmt_currency(nomina.get("auxilio_transporte",0)),s_val_r)])
+    dev_data.append(
+        [Paragraph("TOTAL DEVENGADO",s_tot), Paragraph("",s_val_c), Paragraph(fmt_currency(nomina.get("salario_bruto",0)),s_tot_r)])
     dev_table = Table(dev_data, colWidths=CW)
     dev_table.setStyle(TableStyle([
         ("BACKGROUND",(0,0),(-1,0),NAVY), ("TEXTCOLOR",(0,0),(-1,0),WHITE),
@@ -198,11 +203,18 @@ def generar_colilla(nomina: dict, output_path: str = None, empresa_id: int = Non
     story.append(Paragraph("● Deducciones", section_style))
     s_hdr_red = ParagraphStyle("dhr", fontName="Helvetica-Bold", fontSize=9, textColor=WHITE)
     ded_total_val = (float(nomina.get("salud",0)) + float(nomina.get("pension",0))
+                     + float(nomina.get("fsp") or 0)
                      + float(nomina.get("prestamo",0)) + float(nomina.get("deducciones",0)))
     ded_data = [
         [Paragraph("Concepto",s_hdr_red), Paragraph("Detalle",s_hdr_wc), Paragraph("Valor",s_hdr_wc)],
-        [Paragraph("Salud (Empleado)",value_style),    Paragraph("Fijo",s_val_c),  Paragraph(fmt_currency(nomina.get("salud",0)),s_val_r)],
-        [Paragraph("Pensión (Empleado)",value_style),  Paragraph("Fijo",s_val_c),  Paragraph(fmt_currency(nomina.get("pension",0)),s_val_r)],
+        [Paragraph("Salud (Empleado)",value_style),    Paragraph("% del IBC",s_val_c),  Paragraph(fmt_currency(nomina.get("salud",0)),s_val_r)],
+        [Paragraph("Pensión (Empleado)",value_style),  Paragraph("% del IBC",s_val_c),  Paragraph(fmt_currency(nomina.get("pension",0)),s_val_r)],
+    ]
+    if float(nomina.get("fsp") or 0) > 0:
+        ded_data.append([Paragraph("Fondo Solidaridad Pensional",value_style),
+                         Paragraph("% del IBC",s_val_c),
+                         Paragraph(fmt_currency(nomina.get("fsp",0)),s_val_r)])
+    ded_data += [
         [Paragraph("Préstamo",value_style),            Paragraph("Cuota",s_val_c), Paragraph(fmt_currency(nomina.get("prestamo",0)),s_val_r)],
         [Paragraph("Otras deducciones",value_style),   Paragraph("—",s_val_c),     Paragraph(fmt_currency(nomina.get("deducciones",0)),s_val_r)],
         [Paragraph("TOTAL DEDUCCIONES",ParagraphStyle("tdr",fontName="Helvetica-Bold",fontSize=9,textColor=RED)),
@@ -346,6 +358,7 @@ def generar_reporte_nomina(empresa: dict, nominas: list, periodo: str, output_pa
     total_bruto = total_neto = total_ded = 0
     for i, n in enumerate(nominas, 1):
         ded_total = (float(n.get("salud",0)) + float(n.get("pension",0))
+                     + float(n.get("fsp") or 0)
                      + float(n.get("prestamo",0)) + float(n.get("deducciones",0)))
         total_bruto += float(n.get("salario_bruto",0))
         total_neto  += float(n.get("salario_neto",0))

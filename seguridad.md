@@ -26,12 +26,15 @@ despliegue y cumplimiento DIAN (nómina electrónica) + Habeas Data.
 - [x] `empresas.correo_password` cifrado en reposo con **DPAPI** (CryptProtectData, ligado al usuario de Windows — sin llave que gestionar); `cifrar_secreto`/`descifrar_secreto`
 - [x] Auto-logout por inactividad (15 min, `SESION_MINUTOS` en `BaseWin`) + re-autenticación `_reautenticar()` en: eliminación definitiva de empleado, restaurar backup de empresa y restaurar backup completo
 
-## Fase 2 — Datos en reposo (decisión arquitectónica primero)
+## Fase 2 — Datos en reposo ✅ (completada, salvo ítem opcional)
 
-- [ ] Decidir: **SQLCipher** (BD completa) vs cifrado por columnas (rompe `UNIQUE(empresa_id, documento)` y búsquedas; requeriría cifrado determinista o blind index)
-- [ ] Gestión de llave vía **DPAPI de Windows** (CryptProtectData / pywin32) — nunca embebida en el `.exe` (PyInstaller es reversible)
-- [ ] Backups cifrados o con contraseña; documentar que `reports/`, `fotos/` y exports quedan en claro
-- [ ] Migrar dinero `REAL` → `INTEGER` (centavos) para evitar errores de redondeo — opcional pero recomendado
+- [x] **SQLCipher para la BD completa**: `sqlite_cipher/sqlite3.dll` (e_sqlcipher de SQLitePCLRaw.lib.e_sqlcipher 2.1.11, renombrada) se precarga con ctypes en `_sqlcipher.py` antes de `import sqlite3` — el módulo estándar queda enlazado a SQLCipher y `PRAGMA key` funciona sin cambiar el API. Nota: `sqlcipher3-binary` no publica wheels Windows → se optó por la DLL empaquetada en `app.spec`
+- [x] Migración automática en `init_db` → `asegurar_cifrado()`: BD en claro se convierte con `sqlcipher_export` + integrity_check antes de reemplazar; backups viejos en `backups/` también se cifran
+- [x] Gestión de llave vía **DPAPI**: llave raw de 32 bytes en `nomina.db.key` (blob CryptProtectData ligado al usuario de Windows) — nunca embebida en el `.exe` ni versionada (`*.db.key` en .gitignore)
+- [x] Backups cifrados: exports completos y por-empresa quedan cifrados; `password` opcional los re-cifra con `PRAGMA rekey` para portabilidad a otro equipo; imports detectan cifrado, prueban llave interna y piden contraseña en GUI si hace falta
+- [x] Protección anti-cuarentena: si la BD está cifrada y no abre (falta `.key`), la app avisa y sale en vez de tratarla como corrupta
+- ⚠️ `reports/`, `fotos/`, `logos/` y exports Excel **siguen en claro en disco** — riesgo residual documentado
+- [ ] Migrar dinero `REAL` → `INTEGER` (centavos) para evitar errores de redondeo — opcional, pospuesto
 
 ## Fase 3 — Autorización ✅ (completada)
 

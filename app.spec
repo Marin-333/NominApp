@@ -4,7 +4,7 @@
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=[],
+    binaries=[('sqlite_cipher/sqlite3.dll', 'sqlite_cipher')],
     datas=[],
     hiddenimports=[],
     hookspath=[],

@@ -1006,7 +1006,13 @@ class SuperAdminWin(BaseWin):
             initialfile=f"NominaApp_backup_COMPLETO_{ts}.db",
             filetypes=[("Base de datos","*.db"),("Todos","*.*")])
         if not ruta: return
-        ok,msg=db.exportar_backup(ruta)
+        from tkinter import simpledialog
+        pw=simpledialog.askstring("Contraseña del backup",
+            "El backup queda cifrado.\n\n"
+            "Escribe una contraseña si vas a restaurarlo en OTRO equipo\n"
+            "(déjalo vacío para usarlo solo en esta instalación):",
+            show="*",parent=self)
+        ok,msg=db.exportar_backup(ruta,password=pw or None)
         if ok:
             messagebox.showinfo("✓ Backup exportado",msg,parent=self)
         else:
@@ -1028,7 +1034,14 @@ class SuperAdminWin(BaseWin):
             title="Seleccionar archivo de backup completo",
             filetypes=[("Base de datos","*.db"),("Todos","*.*")])
         if not ruta: return
-        ok,msg=db.importar_backup(ruta)
+        pw=None
+        if db.archivo_cifrado(ruta) and not db.probar_clave_db(ruta):
+            from tkinter import simpledialog
+            pw=simpledialog.askstring("Backup cifrado",
+                "Este backup está protegido con contraseña.\n"
+                "Escríbela para continuar:",show="*",parent=self)
+            if pw is None: return
+        ok,msg=db.importar_backup(ruta,password=pw)
         if ok:
             messagebox.showinfo("✓ Backup restaurado",msg,parent=self)
         else:
@@ -3308,7 +3321,13 @@ class AdminWin(BaseWin):
             initialfile=f"NominaApp_backup_{emp_name}_{ts}.db",
             filetypes=[("Base de datos","*.db"),("Todos","*.*")])
         if not ruta: return
-        ok,msg=db.exportar_backup_empresa(self.eid,ruta)
+        from tkinter import simpledialog
+        pw=simpledialog.askstring("Contraseña del backup",
+            "El backup queda cifrado.\n\n"
+            "Escribe una contraseña si vas a restaurarlo en OTRO equipo\n"
+            "(déjalo vacío para usarlo solo en esta instalación):",
+            show="*",parent=self)
+        ok,msg=db.exportar_backup_empresa(self.eid,ruta,password=pw or None)
         if ok:
             db.registrar_bitacora(self.user["id"],self.user["nombre"],"Exportó backup de empresa",ruta,empresa_id=self.eid)
             messagebox.showinfo("✓ Backup exportado",msg,parent=self)
@@ -3332,7 +3351,14 @@ class AdminWin(BaseWin):
             title="Seleccionar archivo de backup de empresa",
             filetypes=[("Base de datos","*.db"),("Todos","*.*")])
         if not ruta: return
-        ok,msg=db.importar_backup_empresa(self.eid,ruta)
+        pw=None
+        if db.archivo_cifrado(ruta) and not db.probar_clave_db(ruta):
+            from tkinter import simpledialog
+            pw=simpledialog.askstring("Backup cifrado",
+                "Este backup está protegido con contraseña.\n"
+                "Escríbela para continuar:",show="*",parent=self)
+            if pw is None: return
+        ok,msg=db.importar_backup_empresa(self.eid,ruta,password=pw)
         if ok:
             db.registrar_bitacora(self.user["id"],self.user["nombre"],"Restauró backup de empresa",ruta,empresa_id=self.eid)
             messagebox.showinfo("✓ Backup restaurado",msg,parent=self)
@@ -3347,6 +3373,19 @@ if __name__ == "__main__":
     _check_single_instance()
     try:
         ok, detalle = db.verificar_integridad()
+        if not ok and db.archivo_cifrado(db.DB_PATH):
+            _r = tk.Tk(); _r.withdraw()
+            messagebox.showerror("No se pudo descifrar la base de datos",
+                "La base de datos está cifrada y no se pudo abrir.\n\n"
+                "Posibles causas:\n"
+                "• Falta el archivo de llave (nomina.db.key)\n"
+                "• La BD proviene de otra instalación/equipo\n"
+                "• El archivo está dañado\n\n"
+                "Restaura un backup exportado con contraseña o recupera\n"
+                "el archivo .key de esta instalación.", parent=_r)
+            _r.destroy()
+            log.error("No se pudo abrir la BD cifrada: %s", detalle)
+            raise SystemExit(1)
         if not ok:
             _r = tk.Tk(); _r.withdraw()
             messagebox.showwarning("Base de datos dañada",

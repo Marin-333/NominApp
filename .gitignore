@@ -1,5 +1,9 @@
 # Datos en vivo (NO versionar — contienen info sensible de empleados)
 nomina.db
+nomina.db.key
+*.db.key
+*.db.import
+*.db.enc
 *.db-journal
 *.db-wal
 *.db-shm

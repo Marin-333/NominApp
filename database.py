@@ -1,6 +1,7 @@
 """
 database.py - Módulo de base de datos SQLite para el sistema de nómina
 """
+import _sqlcipher  # precarga SQLCipher ANTES de importar sqlite3
 import sqlite3
 import hashlib
 import os
@@ -82,9 +83,145 @@ def descifrar_secreto(valor: str) -> str:
                         protect=False).decode("utf-8")
 
 
+# ─── Cifrado de la base de datos (Fase 2: SQLCipher + DPAPI) ──────────────────
+# La llave raw de 32 bytes vive en <nomina.db>.key protegida con DPAPI (ligada
+# al usuario de Windows). Nunca se embebe en el .exe ni se versiona.
+CIFRADO_DB = _sqlcipher.CIFRADO_OK
+_CLAVES_DB = {}
+
+
+def _ruta_llave():
+    return DB_PATH + ".key"
+
+
+def _proteger_llave(raw: bytes) -> bytes:
+    try:
+        return b"DP1" + _dpapi_crypt(raw, protect=True)
+    except Exception:
+        return b"RAW" + raw   # fallback fuera de Windows
+
+
+def _desproteger_llave(blob: bytes) -> bytes:
+    if blob.startswith(b"DP1"):
+        return _dpapi_crypt(blob[3:], protect=False)
+    if blob.startswith(b"RAW"):
+        return blob[3:]
+    return blob   # formato desconocido: se intenta tal cual
+
+
+def _clave_db_hex() -> str:
+    """Llave de cifrado de la BD actual (hex). Se genera una sola vez y se
+    cachea por ruta para respetar el monkeypatch de DB_PATH en tests."""
+    if DB_PATH in _CLAVES_DB:
+        return _CLAVES_DB[DB_PATH]
+    kf = _ruta_llave()
+    if os.path.exists(kf):
+        raw = _desproteger_llave(open(kf, "rb").read())
+    else:
+        raw = os.urandom(32)
+        open(kf, "wb").write(_proteger_llave(raw))
+    _CLAVES_DB[DB_PATH] = raw.hex()
+    return _CLAVES_DB[DB_PATH]
+
+
+def _sql_lit(s) -> str:
+    """Literal SQL seguro para valores que no admiten bind params (PRAGMAs)."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def _bd_esta_cifrada(path: str) -> bool:
+    """Una BD en texto plano empieza con 'SQLite format 3'; una SQLCipher no."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) != b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+def archivo_cifrado(path: str) -> bool:
+    return _bd_esta_cifrada(path)
+
+
+def _conectar_archivo(path: str, password: str = None):
+    """Conecta a un .db cualquiera aplicando la llave interna (o `password`
+    si se indica) solo cuando el archivo está cifrado."""
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    if CIFRADO_DB and _bd_esta_cifrada(path):
+        if password:
+            conn.execute(f"PRAGMA key = {_sql_lit(password)}")
+        else:
+            conn.execute(f"PRAGMA key = \"x'{_clave_db_hex()}'\"")
+    return conn
+
+
+def probar_clave_db(path: str, password: str = None) -> bool:
+    """True si el archivo abre con la llave interna o el password dado."""
+    try:
+        conn = _conectar_archivo(path, password)
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        conn.close()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _cifrar_archivo_db(path: str):
+    """Convierte un archivo .db en texto plano a SQLCipher con la llave
+    interna, verificando integridad antes de reemplazar el original."""
+    key = _clave_db_hex()
+    tmp = f"{path}.enc"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    src = sqlite3.connect(path)          # sin key → abre el archivo en claro
+    try:
+        try:
+            src.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.Error:
+            pass
+        src.execute("PRAGMA journal_mode=DELETE").fetchone()
+        src.execute(f"ATTACH DATABASE ? AS encrypted KEY \"x'{key}'\"", (tmp,))
+        src.execute("SELECT sqlcipher_export('encrypted')").fetchone()
+        src.execute("DETACH DATABASE encrypted")
+    finally:
+        src.close()
+    for ext in ("-wal", "-shm"):
+        if os.path.exists(path + ext):
+            os.remove(path + ext)
+    chk = _conectar_archivo(tmp)
+    ok = chk.execute("PRAGMA integrity_check").fetchone()
+    chk.close()
+    if not ok or ok[0] != "ok":
+        os.remove(tmp)
+        raise RuntimeError("Falló la verificación de la BD cifrada")
+    os.replace(tmp, path)
+
+
+def asegurar_cifrado() -> bool:
+    """Migra la BD principal (y backups automáticos viejos) de texto plano
+    a SQLCipher. Devuelve True si cifró la BD principal en esta llamada."""
+    if not CIFRADO_DB or not os.path.exists(DB_PATH):
+        return False
+    migrada = False
+    if not _bd_esta_cifrada(DB_PATH):
+        _cifrar_archivo_db(DB_PATH)
+        migrada = True
+    if os.path.isdir(BACKUP_DIR):
+        for f in os.listdir(BACKUP_DIR):
+            p = os.path.join(BACKUP_DIR, f)
+            if f.endswith(".db") and not _bd_esta_cifrada(p):
+                try:
+                    _cifrar_archivo_db(p)
+                except Exception:
+                    pass   # backup ilegible: se deja, no se pierde datos
+    return migrada
+
+
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    if CIFRADO_DB:
+        conn.execute(f"PRAGMA key = \"x'{_clave_db_hex()}'\"")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -155,13 +292,15 @@ def verificar_integridad():
     if not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) == 0:
         return True, ""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _conectar_archivo(DB_PATH)
         res = conn.execute("PRAGMA integrity_check").fetchone()
         conn.close()
         if res and res[0] == "ok":
             return True, ""
         return False, res[0] if res else "integrity_check sin resultado"
     except sqlite3.Error as e:
+        if _bd_esta_cifrada(DB_PATH):
+            return False, f"BD cifrada ilegible (¿falta {_ruta_llave()}?): {e}"
         return False, str(e)
 
 
@@ -219,6 +358,7 @@ def verify_password(password: str, hashed: str) -> bool:
 
 def init_db():
     """Inicializa la base de datos con todas las tablas necesarias."""
+    asegurar_cifrado()
     conn = get_connection()
     c = conn.cursor()
 
@@ -1496,25 +1636,37 @@ def listar_bitacora(limite=200, empresa_id=None):
 
 # ─── BACKUP / RESTAURACIÓN ───────────────────────────────────────────────────
 
-def exportar_backup(ruta_destino):
-    """Copia la base de datos completa a la ruta indicada (superadmin)."""
+def exportar_backup(ruta_destino, password=None):
+    """Copia la base de datos completa a la ruta indicada (superadmin).
+    El archivo queda cifrado; con `password` se re-cifra con esa contraseña
+    para poder restaurarlo en otro equipo."""
     _requerir_rol("superadmin")
-    import shutil
     try:
         shutil.copy2(DB_PATH, ruta_destino)
+        if CIFRADO_DB and password:
+            conn = _conectar_archivo(ruta_destino)
+            conn.execute(f"PRAGMA rekey = {_sql_lit(password)}")
+            conn.close()
         return True, f"Backup completo exportado a:\n{ruta_destino}"
     except Exception as e:
         return False, f"Error al exportar backup: {e}"
 
 
-def exportar_backup_empresa(empresa_id, ruta_destino):
-    """Exporta solo los datos de una empresa a un archivo .db separado."""
+def exportar_backup_empresa(empresa_id, ruta_destino, password=None):
+    """Exporta solo los datos de una empresa a un archivo .db separado.
+    El archivo queda cifrado (llave interna o `password` si se indica)."""
     _verificar_scope_empresa(empresa_id)
     try:
         conn_src = get_connection()
         import sqlite3 as _sql
         conn_dst = _sql.connect(ruta_destino)
         conn_dst.row_factory = _sql.Row
+        if CIFRADO_DB:
+            if password:
+                conn_dst.execute(f"PRAGMA key = {_sql_lit(password)}")
+            else:
+                conn_dst.execute(
+                    f"PRAGMA key = \"x'{_clave_db_hex()}'\"")
 
         conn_dst.executescript("""
             CREATE TABLE IF NOT EXISTS empresas (
@@ -1622,24 +1774,46 @@ def exportar_backup_empresa(empresa_id, ruta_destino):
         return False, f"Error al exportar backup de empresa: {e}"
 
 
-def importar_backup(ruta_origen):
-    """Restaura la base de datos completa desde un backup (superadmin)."""
+def importar_backup(ruta_origen, password=None):
+    """Restaura la base de datos completa desde un backup (superadmin).
+    Acepta backups en texto plano, cifrados con la llave interna o con una
+    contraseña de exportación (`password`); el resultado siempre queda con
+    la llave interna de esta instalación."""
     _requerir_rol("superadmin")
-    import shutil
     try:
-        shutil.copy2(ruta_origen, DB_PATH)
+        tmp = DB_PATH + ".import"
+        shutil.copy2(ruta_origen, tmp)
+        if CIFRADO_DB:
+            if _bd_esta_cifrada(tmp):
+                if not probar_clave_db(tmp):
+                    if password and probar_clave_db(tmp, password):
+                        conn = _conectar_archivo(tmp, password)
+                        conn.execute(
+                            f"PRAGMA rekey = \"x'{_clave_db_hex()}'\"")
+                        conn.close()
+                    else:
+                        os.remove(tmp)
+                        return False, ("El backup está cifrado y no se pudo "
+                                       "descifrar. Indica la contraseña de "
+                                       "exportación si la tiene.")
+            else:
+                _cifrar_archivo_db(tmp)   # backup antiguo en claro
+        os.replace(tmp, DB_PATH)
         return True, "Base de datos restaurada correctamente.\nReinicie la aplicación para ver los cambios."
     except Exception as e:
         return False, f"Error al importar backup: {e}"
 
 
-def importar_backup_empresa(empresa_id, ruta_origen):
+def importar_backup_empresa(empresa_id, ruta_origen, password=None):
     """Restaura datos de empresa desde backup. Usa dict() para evitar sqlite3.Row.get() errors."""
     _verificar_scope_empresa(empresa_id)
-    import sqlite3 as _sq
     try:
-        conn_src = _sq.connect(ruta_origen)
-        conn_src.row_factory = _sq.Row
+        try:
+            conn_src = _conectar_archivo(ruta_origen, password)
+            conn_src.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        except sqlite3.Error:
+            return False, ("No se pudo abrir el archivo de backup: está "
+                           "cifrado con otra contraseña o está dañado.")
         conn_dst = get_connection()
 
         def _get_rows(conn, table, where_col=None, where_val=None):

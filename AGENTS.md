@@ -38,12 +38,22 @@ pendientes de consolidar.
 
 - `app.py` — GUI Tkinter
 - `database.py` — SQLite + lógica de negocio (nómina, préstamos, contratos, backups)
+- `_sqlcipher.py` — precarga `sqlite_cipher/sqlite3.dll` antes de `import sqlite3`
+- `sqlite_cipher/sqlite3.dll` — e_sqlcipher.dll renombrada (NuGet
+  `SQLitePCLRaw.lib.e_sqlcipher` 2.1.11; SQLCipher community, Apache-2.0/BSD).
+  Va en `app.spec` → `binaries`. Si falta, la app corre en texto plano.
 - `pdf_generator.py` — reportes ReportLab
 - `paths.py` — rutas persistentes (DB y reports junto al exe cuando está congelado)
-- `nomina.db`, `reports/`, `logos/`, `fotos/` — datos persistentes
+- `nomina.db` + `nomina.db.key`, `reports/`, `logos/`, `fotos/` — datos persistentes
 
 ## Advertencias conocidas
 
 - El backup de empresa remapea IDs al importar (no insertar IDs originales).
 - La FK `empleados` tiene `ON DELETE CASCADE`: "mantener nóminas" = inactivar.
-- Contraseñas usan SHA-256 sin salt (mejora pendiente: PBKDF2/bcrypt).
+- `nomina.db` está cifrada (SQLCipher). La llave está en `nomina.db.key`
+  protegida con DPAPI del usuario de Windows: sin ese archivo (o en otro
+  equipo/perfil) la BD no abre. Para backups portables, exportar CON
+  contraseña desde la sección Backup.
+- Contraseñas de usuarios: bcrypt (migración transparente desde SHA-256).
+- Las funciones de `database.py` validan sesión/rol/empresa: en scripts de
+  prueba llamar primero `db.establecer_sesion(usuario)` o saltará PermissionError.

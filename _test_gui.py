@@ -12,6 +12,7 @@ os.makedirs(paths.REPORTS_DIR, exist_ok=True)
 
 import database as db
 db.DB_PATH = paths.DB_PATH
+db.BACKUP_DIR = os.path.join(TMP, "backups")
 db.init_db(); db.migrar_base_datos()
 db.establecer_sesion(db.autenticar("superadmin", "Admin2024!"))  # Fase 3
 

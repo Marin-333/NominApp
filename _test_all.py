@@ -12,6 +12,7 @@ os.makedirs(paths.REPORTS_DIR, exist_ok=True)
 
 import database as db
 db.DB_PATH = paths.DB_PATH
+db.BACKUP_DIR = os.path.join(TMP, "backups")   # no tocar backups/ reales
 
 import pdf_generator as pdf
 pdf.REPORTS_DIR = paths.REPORTS_DIR
@@ -50,6 +51,13 @@ print("="*70); print("PRUEBAS CAPA DE DATOS"); print("="*70)
 run("init_db", db.init_db)
 run("migrar_base_datos", db.migrar_base_datos)
 run("migrar_base_datos (idempotente)", db.migrar_base_datos)
+
+# ── Cifrado de BD (Fase 2) ─────────────────────────────────────────────────
+check("cifrado disponible (SQLCipher)", db.CIFRADO_DB)
+if db.CIFRADO_DB:
+    check("BD cifrada en disco", db._bd_esta_cifrada(db.DB_PATH))
+    check("archivo .key existe", os.path.exists(db.DB_PATH + ".key"))
+    check("integrity en BD cifrada", db.verificar_integridad()[0])
 
 # Auth
 u = run("autenticar superadmin", lambda: db.autenticar("superadmin", "Admin2024!"))
@@ -224,8 +232,8 @@ check("excel datos", ws.cell(row=5, column=2).value is not None, f"A5={ws.cell(r
 bk = os.path.join(TMP, "backup_emp.db")
 ok, msg = db.exportar_backup_empresa(EID, bk)
 check("exportar_backup_empresa", ok, msg)
-import sqlite3
-bc = sqlite3.connect(bk)
+check("backup empresa cifrado", db._bd_esta_cifrada(bk) if db.CIFRADO_DB else True)
+bc = db._conectar_archivo(bk)   # el export queda cifrado con la llave interna
 tables = [r[0] for r in bc.execute("SELECT name FROM sqlite_master WHERE type='table'")]
 print("   tablas en backup:", tables)
 check("contratos en backup", "contratos" in tables)
@@ -243,6 +251,22 @@ check("contratos restaurados", len(db.listar_contratos(EID)) == 1)
 # Backup completo
 bk2 = os.path.join(TMP, "full.db")
 run("exportar_backup", lambda: db.exportar_backup(bk2))
+check("backup completo cifrado", db._bd_esta_cifrada(bk2) if db.CIFRADO_DB else True)
+
+# ── Backup con contraseña (Fase 2, portabilidad) ───────────────────────────
+if db.CIFRADO_DB:
+    bkp = os.path.join(TMP, "backup_pw.db")
+    ok, msg = db.exportar_backup(bkp, password="BkpPass123")
+    check("export con password", ok, msg)
+    check("backup pw cifrado", db._bd_esta_cifrada(bkp))
+    check("abre con password", db.probar_clave_db(bkp, "BkpPass123"))
+    check("rechaza password malo", not db.probar_clave_db(bkp, "mala"))
+    check("rechaza llave interna", not db.probar_clave_db(bkp))
+    bke = os.path.join(TMP, "backup_emp_pw.db")
+    ok, msg = db.exportar_backup_empresa(EID, bke, password="EmpPass1")
+    check("export empresa con password", ok, msg)
+    ok, msg = db.importar_backup_empresa(EID, bke, password="EmpPass1")
+    check("import empresa con password", ok, msg)
 
 print("="*70); print("PRUEBAS PDF"); print("="*70)
 
